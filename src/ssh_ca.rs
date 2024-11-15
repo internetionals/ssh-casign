@@ -26,6 +26,8 @@ pub(crate) enum SignError {
     CertificateError(#[from] ssh_key::Error),
     #[error("invalid timestamp")]
     SystemTimeError(#[from] std::time::SystemTimeError),
+    #[error("tokio join error")]
+    JoinError(#[from] tokio::task::JoinError),
 }
 
 fn gen_nonce(len: usize) -> Vec<u8> {
@@ -53,8 +55,7 @@ impl SshCa {
             client_public_key,
             valid_after,
             valid_before,
-        )
-        .expect("certificate builder");
+        )?;
         for principal in &sign_options.certificate.valid_principals {
             cert_builder.valid_principal(principal)?;
         }
@@ -76,8 +77,7 @@ impl SshCa {
         }
         let certificate =
             tokio::task::spawn_blocking(move || cert_builder.sign(self.private_key.as_ref()))
-                .await
-                .expect("Threading error")?;
+                .await??;
         Ok(certificate)
     }
 }
