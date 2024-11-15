@@ -1,11 +1,13 @@
-mod oidc;
-mod sign_key;
-mod state;
+use crate::config::Config;
 
-pub(crate) async fn main() {
-    let oidc_issuer = "http://localhost:8080/ssh-casign";
-    let ssh_ca = crate::ssh_ca::SshCa::new("ssh-ca", "ssh-ca.pub").expect("ssh-ca keys");
-    let app_state = state::AppState::new(oidc_issuer, ssh_ca).await;
+pub(crate) mod oidc;
+pub(crate) mod sign_key;
+pub(crate) mod state;
+
+pub(crate) async fn main(config: &str) {
+    let config: Config = toml::from_str(config).expect("configuration");
+    let ssh_ca = crate::ssh_ca::SshCa::new("ssh-ca").expect("ssh-ca keys");
+    let app_state = state::AppState::new(config, ssh_ca).await;
 
     // build our application with a route
     let app = axum::Router::new()

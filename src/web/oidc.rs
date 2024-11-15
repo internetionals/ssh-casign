@@ -13,9 +13,31 @@ use axum_extra::{
 use oidc_jwt_validator::Validator;
 use serde::Deserialize;
 
+use super::state::AppState;
+
+#[derive(Deserialize)]
+pub(crate) struct Config {
+    url: String,
+}
+
+impl Config {
+    pub(crate) async fn get_validator(&self) -> Validator {
+        let http_client = reqwest::ClientBuilder::new().build().expect("http client");
+        let validation_settings = oidc_jwt_validator::ValidationSettings::new();
+        Validator::new(
+            self.url.as_str(),
+            http_client,
+            oidc_jwt_validator::cache::Strategy::Automatic,
+            validation_settings,
+        )
+        .await
+        .expect("oidc validator")
+    }
+}
+
 /// Claims<T> can be used to require OpenID Connect authorization
 /// The supplied struct can be used to fetch possible relevant OpenID Connect claims
-/// 
+///
 /// Usage: `async fn some_axum_handler(claims: Claims<MyClaims>)`
 #[derive(Debug)]
 pub(super) struct Claims<T: for<'de> Deserialize<'de>>(T);
@@ -53,7 +75,8 @@ impl IntoResponse for AuthError {
 #[axum::async_trait]
 impl<S, T: for<'de> Deserialize<'de>> FromRequestParts<S> for Claims<T>
 where
-    Arc<Validator>: FromRef<S>,
+    // Arc<Validator>: FromRef<S>,
+    Arc<AppState>: FromRef<S>,
     S: Send + Sync,
 {
     // If anything goes wrong or no session is found, redirect to the auth page
@@ -67,8 +90,9 @@ where
             .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
 
         // Validate token
-        let oidc_validator = Arc::<Validator>::from_ref(state);
-        let token_data = oidc_validator
+        let state = Arc::<AppState>::from_ref(state);
+        let token_data = state
+            .oidc_validator
             .validate::<T>(bearer.token())
             .await
             .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
