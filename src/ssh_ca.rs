@@ -3,17 +3,17 @@ use ssh_key::{Certificate, PrivateKey, PublicKey};
 use std::{collections::HashMap, path::Path, sync::Arc};
 use thiserror::Error;
 
-pub struct CertificateOptions {
-    pub valid_principals: Vec<String>,
-    pub key_id: Option<String>,
-    pub comment: Option<String>,
-    pub extensions: Option<HashMap<String, String>>,
-    pub critical_options: Option<HashMap<String, String>>,
+pub struct CertificateOptions<'a> {
+    pub valid_principals: &'a [String],
+    pub key_id: Option<&'a str>,
+    pub comment: Option<&'a str>,
+    pub extensions: Option<&'a HashMap<String, String>>,
+    pub critical_options: Option<&'a HashMap<String, String>>,
 }
 
-pub struct SignOptions {
+pub struct SignOptions<'a> {
     pub validity: u64,
-    pub certificate: CertificateOptions,
+    pub certificate: CertificateOptions<'a>,
 }
 
 pub(crate) struct SshCa {
@@ -23,11 +23,11 @@ pub(crate) struct SshCa {
 #[derive(Debug, Error)]
 pub(crate) enum SignError {
     #[error("unable to generate certificate")]
-    CertificateError(#[from] ssh_key::Error),
+    Certificate(#[from] ssh_key::Error),
     #[error("invalid timestamp")]
-    SystemTimeError(#[from] std::time::SystemTimeError),
+    SystemTime(#[from] std::time::SystemTimeError),
     #[error("tokio join error")]
-    JoinError(#[from] tokio::task::JoinError),
+    Join(#[from] tokio::task::JoinError),
 }
 
 fn gen_nonce(len: usize) -> Vec<u8> {
@@ -44,7 +44,7 @@ impl SshCa {
     pub(crate) async fn sign(
         self: Arc<Self>,
         client_public_key: PublicKey,
-        sign_options: SignOptions,
+        sign_options: SignOptions<'_>,
     ) -> Result<Certificate, SignError> {
         let valid_after = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -56,21 +56,21 @@ impl SshCa {
             valid_after,
             valid_before,
         )?;
-        for principal in &sign_options.certificate.valid_principals {
+        for principal in sign_options.certificate.valid_principals {
             cert_builder.valid_principal(principal)?;
         }
-        if let Some(key_id) = &sign_options.certificate.key_id {
+        if let Some(key_id) = sign_options.certificate.key_id {
             cert_builder.key_id(key_id)?;
         }
-        if let Some(comment) = &sign_options.certificate.comment {
+        if let Some(comment) = sign_options.certificate.comment {
             cert_builder.comment(comment)?;
         }
-        if let Some(extensions) = &sign_options.certificate.extensions {
+        if let Some(extensions) = sign_options.certificate.extensions {
             for (name, data) in extensions {
                 cert_builder.extension(name, data)?;
             }
         }
-        if let Some(critical_options) = &sign_options.certificate.critical_options {
+        if let Some(critical_options) = sign_options.certificate.critical_options {
             for (name, data) in critical_options {
                 cert_builder.critical_option(name, data)?;
             }

@@ -22,20 +22,14 @@ impl CertificateSettings {
         Ok(SignOptions {
             validity: claims.validity.unwrap_or(self.validity),
             certificate: CertificateOptions {
-                key_id: claims.key_id.to_owned(),
-                comment: claims
-                    .comment
-                    .to_owned()
-                    .or_else(|| self.comment.to_owned()),
-                valid_principals: claims.valid_principals.clone(),
-                extensions: claims
-                    .extensions
-                    .to_owned()
-                    .or_else(|| self.extensions.to_owned()),
+                key_id: claims.key_id.as_deref(),
+                comment: claims.comment.as_deref().or(self.comment.as_deref()),
+                valid_principals: &claims.valid_principals,
+                extensions: claims.extensions.as_ref().or(self.extensions.as_ref()),
                 critical_options: claims
                     .critical_options
-                    .to_owned()
-                    .or_else(|| self.critical_options.to_owned()),
+                    .as_ref()
+                    .or(self.critical_options.as_ref()),
             },
         })
     }
