@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use axum::{
     debug_handler,
@@ -10,22 +10,22 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::{event, span, Level};
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct SignKeyClaims {
-    pub(crate) validity: Option<u64>,
-    pub(crate) key_id: Option<String>,
-    pub(crate) valid_principals: Vec<String>,
-    pub(crate) comment: Option<String>,
-    pub(crate) critical_options: Option<HashMap<String, String>>,
-    pub(crate) extensions: Option<HashMap<String, String>>,
+use crate::{
+    certificate_settings::CertificateClaims,
+    ssh_ca::{CertificateOptions, SshCa},
+};
 
-    #[serde(flatten)]
-    pub(crate) other: HashMap<String, serde_json::Value>,
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CertType {
+    Host,
+    User,
 }
 
 #[derive(Deserialize)]
 pub(super) struct SignKeyRequest {
     public_key: String,
+    cert_type: CertType,
 }
 
 #[derive(Serialize)]
@@ -38,31 +38,27 @@ struct HttpError<'a> {
     error: &'a str,
 }
 
-fn http_error<ErrStr: AsRef<str>, Err: std::fmt::Display>(
-    status_code: axum::http::StatusCode,
+fn log_error_response<ErrStr: AsRef<str>, Err: std::fmt::Display>(
+    status_code: StatusCode,
     error: ErrStr,
 ) -> impl FnOnce(Err) -> Response {
     move |e| -> Response {
-        event!(Level::ERROR, "{} ({}): {}", status_code, error.as_ref(), e);
-        (
-            status_code,
-            Json(HttpError {
-                error: error.as_ref(),
-            }),
-        )
-            .into_response()
+        let error = error.as_ref();
+        event!(Level::ERROR, "{} ({}): {}", status_code, error, e);
+        let body: Json<HttpError<'_>> = Json(HttpError { error });
+        (status_code, body).into_response()
     }
 }
 
-#[allow(dead_code)]
-fn log_http_error<T: std::fmt::Display>(e: T) -> Response {
-    event!(Level::ERROR, "Internal server error: {}", e);
-    (StatusCode::INTERNAL_SERVER_ERROR, ()).into_response()
+fn error_response(status_code: StatusCode, error: &str) -> Response {
+    event!(Level::ERROR, "{} ({})", status_code, error);
+    let body: Json<HttpError<'_>> = Json(HttpError { error });
+    (status_code, body).into_response()
 }
 
 #[debug_handler]
 pub(super) async fn sign_key(
-    claims: super::oidc::Claims<SignKeyClaims>,
+    claims: super::oidc::Claims<CertificateClaims>,
     State(state): State<Arc<super::state::AppState>>,
     Json(payload): Json<SignKeyRequest>,
 ) -> Result<impl IntoResponse, Response> {
@@ -70,33 +66,39 @@ pub(super) async fn sign_key(
     let _guard = span.enter();
 
     let client_public_key = ssh_key::PublicKey::from_openssh(&payload.public_key).map_err(
-        http_error(StatusCode::BAD_REQUEST, "Not a valid ssh public key"),
+        log_error_response(StatusCode::BAD_REQUEST, "Not a valid ssh public key"),
     )?;
 
-    let Some(profile) = state.config.profiles.lookup(&claims) else {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(HttpError {
-                error: "No profile for client",
-            }),
-        )
-            .into_response());
+    let mut options = match payload.cert_type {
+        CertType::Host => unimplemented!(),
+        CertType::User => CertificateOptions::new_user(client_public_key),
     };
 
-    let sign_options = profile.sign_options(&claims).map_err(http_error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "Unable to apply certificate settings",
-    ))?;
-    let ssh_ca = state.ssh_ca.clone();
+    let profile =
+        state.config.profiles.lookup(&claims).ok_or_else(|| {
+            error_response(StatusCode::FORBIDDEN, "No applicable profile for client")
+        })?;
+    profile
+        .apply(&mut options, &claims)
+        .map_err(log_error_response(
+            StatusCode::FORBIDDEN,
+            "No applicable profile for client",
+        ))?;
+    let ssh_ca = state
+        .ssh_ca_providers
+        .get(profile.ssh_ca())
+        .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Provider unavailable"))?
+        .clone();
+
     let certificate = ssh_ca
-        .sign(client_public_key, sign_options)
+        .sign(&options)
         .await
-        .map_err(http_error(
+        .map_err(log_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to generate certificate",
         ))?
         .to_openssh()
-        .map_err(http_error(
+        .map_err(log_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to generate openssh certificate",
         ))?;

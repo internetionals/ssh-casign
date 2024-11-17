@@ -6,8 +6,7 @@ pub(crate) mod state;
 
 pub(crate) async fn main(config: &str) {
     let config: Config = toml::from_str(config).expect("configuration");
-    let ssh_ca = crate::ssh_ca::SshCa::new("ssh-ca").expect("ssh-ca keys");
-    let app_state = state::AppState::new(config, ssh_ca).await;
+    let app_state = state::AppState::new(config).await;
 
     // build our application with a route
     let app = axum::Router::new()
