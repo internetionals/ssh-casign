@@ -1,9 +1,6 @@
-use serde::Deserialize;
-use ssh_key::{certificate::CertType, Certificate, PublicKey};
 use std::{collections::HashMap, sync::Arc};
-use thiserror::Error;
 
-pub(crate) mod file;
+use ssh_key::{certificate::CertType, PublicKey};
 
 /// Certificate options describe all the parameters that are needed to
 /// generate a certificate.
@@ -140,64 +137,5 @@ impl<'a> CertificateOptions {
         self.critical_options
             .iter()
             .map(|(k, v)| (k.as_ref(), v.as_ref()))
-    }
-}
-
-#[derive(Debug, Error)]
-pub(crate) enum SignError {
-    #[error("certificate type not supported")]
-    UnsupportedCertType,
-    #[error("certificate without principals")]
-    NoPrincipals,
-    #[error("No certificate validity known")]
-    UnknownValidity,
-    #[error("unable to generate certificate")]
-    Certificate(#[from] ssh_key::Error),
-    #[error("invalid timestamp")]
-    SystemTime(#[from] std::time::SystemTimeError),
-    #[error("tokio join error")]
-    Join(#[from] tokio::task::JoinError),
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub(crate) enum SshCaProviderConfig {
-    File(file::Config),
-}
-
-#[derive(Deserialize)]
-pub(crate) struct Config {
-    #[serde(flatten)]
-    providers: HashMap<Arc<str>, SshCaProviderConfig>,
-}
-
-pub(crate) enum SshCaProvider {
-    File(Arc<file::State>),
-}
-
-pub(crate) type SshCaProviders = HashMap<Arc<str>, Arc<SshCaProvider>>;
-
-impl Config {
-    pub fn load(&self) -> Result<SshCaProviders, Box<dyn std::error::Error>> {
-        let mut providers = HashMap::new();
-        for (name, provider_config) in &self.providers {
-            let provider = match provider_config {
-                SshCaProviderConfig::File(file_config) => SshCaProvider::File(file_config.load()?),
-            };
-            providers.insert(name.clone(), Arc::new(provider));
-        }
-        Ok(providers)
-    }
-}
-
-pub trait SshCa {
-    async fn sign(self: Arc<Self>, options: &CertificateOptions) -> Result<Certificate, SignError>;
-}
-
-impl SshCa for SshCaProvider {
-    async fn sign(self: Arc<Self>, options: &CertificateOptions) -> Result<Certificate, SignError> {
-        match self.as_ref() {
-            SshCaProvider::File(file) => file.clone().sign(options).await,
-        }
     }
 }

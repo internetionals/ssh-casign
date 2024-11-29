@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{event, span, Level};
 
 use crate::{
-    certificate_settings::CertificateClaims,
-    ssh_ca::{CertificateOptions, SshCa},
+    certificate::{options::CertificateOptions, profiles::CertificateClaims},
+    authority::Signer,
 };
 
 #[derive(Deserialize)]
@@ -84,13 +84,13 @@ pub(super) async fn sign_key(
             StatusCode::FORBIDDEN,
             "No applicable profile for client",
         ))?;
-    let ssh_ca = state
-        .ssh_ca_providers
+    let provider = state
+        .authorities
         .get(profile.ssh_ca())
         .ok_or_else(|| error_response(StatusCode::INTERNAL_SERVER_ERROR, "Provider unavailable"))?
         .clone();
 
-    let certificate = ssh_ca
+    let certificate = provider
         .sign(&options)
         .await
         .map_err(log_error_response(

@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::{collections::HashMap, sync::Arc};
 
-use crate::ssh_ca::CertificateOptions;
+use super::options::CertificateOptions;
 
 #[derive(thiserror::Error, Debug)]
 pub(crate) enum Error {

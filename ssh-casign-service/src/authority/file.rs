@@ -43,7 +43,7 @@ pub(crate) struct State {
     cert_types: Vec<ssh_key::certificate::CertType>,
 }
 
-impl super::SshCa for State {
+impl super::Signer for State {
     async fn sign(self: Arc<Self>, options: &CertificateOptions) -> Result<Certificate, SignError> {
         if options.principals().next().is_none() {
             return Err(SignError::NoPrincipals);
