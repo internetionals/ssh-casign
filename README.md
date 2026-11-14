@@ -139,8 +139,11 @@ right port and configuration source:
   the Lambda Web Adapter).
 - Google Cloud Run functions: planned.
 
-`deploy/build-static.sh` builds the static Linux binaries (musl, rustls) for these,
-cross-compiled with `cargo-zigbuild` for x86-64 or arm64.
+`deploy/build-static.sh` builds the static Linux binaries (musl, rustls) for these, for
+x86-64 or arm64, in a `rust` container: natively with `musl-gcc` when the target is the
+build machine's architecture, otherwise cross-compiled with `cargo-zigbuild` (Zig
+provides the C compiler and linker; it is downloaded once and checked against its
+published SHA-256). `BUILD_METHOD=native|zig` overrides the choice.
 
 ### Signature algorithms
 

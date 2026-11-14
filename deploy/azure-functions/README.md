@@ -19,8 +19,9 @@ CONFIG=path/to/config.toml deploy/azure-functions/build.sh
 ```
 
 The binary is static (x86-64 Linux, musl, rustls), so it doesn't depend on the OpenSSL
-version of the Functions image. It is cross-compiled in a `rust` container with
-`cargo-zigbuild` (no emulation; works on x86-64 and ARM hosts). Features:
+version of the Functions image. `deploy/build-static.sh` builds it in a `rust`
+container: natively on an x86-64 machine, otherwise cross-compiled with `cargo-zigbuild`
+(no emulation, so ARM machines work too). Features:
 `ca-azure-keyvault,tls-rustls`; extra features can be passed as the first argument, e.g.
 `build.sh ca-file`.
 

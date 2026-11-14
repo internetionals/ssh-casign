@@ -19,9 +19,10 @@ CONFIG=path/to/config.toml deploy/aws-lambda/build.sh
 ```
 
 - `ARCH=arm64` (default, Graviton) or `ARCH=x86_64`; `IMAGE=name:tag`.
-- The binary is static (musl, rustls), cross-compiled with `cargo-zigbuild` by
-  `deploy/build-static.sh`. Features: `ca-aws-kms,tls-rustls`; extra features can be
-  passed as the first argument.
+- The binary is static (musl, rustls), built by `deploy/build-static.sh` (natively on
+  a machine of the same architecture, else cross-compiled with `cargo-zigbuild`).
+  Features: `ca-aws-kms,tls-rustls`; extra features can be passed as the first
+  argument.
 - The image is `public.ecr.aws/lambda/provided:al2023` with the binary as
   `/var/runtime/bootstrap` and the adapter in `/opt/extensions/`. The service listens
   on port 8000 (`PORT`, `AWS_LWA_PORT`); the adapter checks readiness on
