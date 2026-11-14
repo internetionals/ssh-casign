@@ -27,9 +27,10 @@ Workspace layout
 | `ssh-casign-ca-vault/`  | Backend: OpenBao / HashiCorp Vault transit                                  |
 | `ssh-casign-ca-azure/`  | Backend: Azure Key Vault / Managed HSM, Entra ID credentials                |
 | `ssh-casign-ca-aws/`    | Backend: AWS KMS, SigV4 and AWS credentials                                 |
+| `ssh-casign-ca-gcp/`    | Backend: Google Cloud KMS and Google credentials                            |
 | `ssh-casign-client/`    | CLI client (clap): discovery, sign-in, `login`, `cert`, `logout`            |
 | `ssh-casign-proto/`     | Wire types shared by service and client                                     |
-| `deploy/`               | Platform packages (Azure Functions, AWS Lambda) and the static build        |
+| `deploy/`               | Platform packages (Azure Functions, AWS Lambda, Cloud Run), static build    |
 | `poc/`                  | Test IdPs, CA keys, configs and scripts (not in git)                        |
 
 Backend crates depend only on `ssh-casign-ca`; the core never depends on a backend. The
@@ -118,9 +119,10 @@ and `aud`. `iss` must equal `oidc_provider.issuer`, and `aud` must contain one o
 ### CA key backends
 
 CA keys can be in a file, on a PKCS#11 token (YubiKey, smart card, HSM), in
-OpenBao/Vault's transit engine, in Azure Key Vault or in AWS KMS; Google Cloud KMS is
-planned. Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`,
-`ca-azure-keyvault`, `ca-aws-kms`), so builds only contain what their platform needs. See
+OpenBao/Vault's transit engine, in Azure Key Vault, in AWS KMS or in Google Cloud KMS.
+Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`,
+`ca-azure-keyvault`, `ca-aws-kms`, `ca-gcp-kms`), so builds only contain what their
+platform needs. See
 [docs/backends.md](docs/backends.md).
 
 ### Serverless
@@ -137,7 +139,8 @@ right port and configuration source:
   handler).
 - AWS Lambda: [deploy/aws-lambda](deploy/aws-lambda/README.md) (container image with
   the Lambda Web Adapter).
-- Google Cloud Run functions: planned.
+- Google Cloud Run: [deploy/gcp-cloud-run](deploy/gcp-cloud-run/README.md) (container
+  image on distroless; Cloud Run functions can't run Rust binaries).
 
 `deploy/build-static.sh` builds the static Linux binaries (musl, rustls) for these, for
 x86-64 or arm64, in a `rust` container: natively with `musl-gcc` when the target is the

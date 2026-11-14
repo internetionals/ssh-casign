@@ -75,6 +75,12 @@ used, which is the one the proxy that talks to the service added; anything to it
 can be set by the client. Only use this when the service is reachable through that proxy
 alone.
 
+If further trusted proxies append their own address after the client's (Google's
+external Application Load Balancer adds `<client>,<load balancer>`), set
+`client_address_skip` to the number of such trailing entries. With fewer entries than
+expected (the proxy was bypassed), the TCP peer is used. Azure App Service's `IP:port`
+entries are understood.
+
 CEF fields
 ----------
 

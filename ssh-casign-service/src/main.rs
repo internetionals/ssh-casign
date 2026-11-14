@@ -33,6 +33,10 @@ fn registry() -> Registry {
     registry.register(ssh_casign_ca_aws::PROVIDER, ssh_casign_ca_aws::load);
     #[cfg(not(feature = "ca-aws-kms"))]
     registry.unavailable("aws_kms", "ca-aws-kms");
+    #[cfg(feature = "ca-gcp-kms")]
+    registry.register(ssh_casign_ca_gcp::PROVIDER, ssh_casign_ca_gcp::load);
+    #[cfg(not(feature = "ca-gcp-kms"))]
+    registry.unavailable("gcp_kms", "ca-gcp-kms");
     registry
 }
 

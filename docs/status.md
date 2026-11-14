@@ -19,14 +19,14 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Claims → profile selection             |  🟡   | one `claim == value` per selector; first match wins      |
 | Certificate policy (defaults + limits) |  ✅   | request → token → profile; both limit; docs/policy.md    |
 | Default user extensions                |  ✅   | ssh-keygen's defaults when no extensions are configured  |
-| CA key backends                        |  🟡   | file, pkcs11, vault, Azure, AWS; GCP planned             |
+| CA key backends                        |  ✅   | file, pkcs11, vault, Azure, AWS, GCP                     |
 | Several CAs per profile                |  ✅   | ordered; selected by the client's accepted algorithms    |
 | CA signature algorithms                |  ✅   | Ed25519, ECDSA, rsa-sha2-512/256, ssh-rsa (opt-in)       |
 | Client key type and size limits        |  ✅   | `allowed_key_types`, `min_rsa_bits`, `max_rsa_bits`      |
 | File-based CA provider                 |  ✅   | OpenSSH private key, restricts allowed cert types        |
-| GCP KMS                                |  ❌   | planned; see docs/backends.md                            |
 | Azure Functions                        |  ✅   | custom handler package in deploy/azure-functions         |
 | AWS Lambda                             |  ✅   | image with Lambda Web Adapter in deploy/aws-lambda       |
+| Google Cloud Run                       |  ✅   | distroless image in deploy/gcp-cloud-run                 |
 | User certificates                      |  ✅   |                                                          |
 | Host certificates                      |  ❌   | refused with 501 until a trust model is designed         |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
@@ -190,8 +190,8 @@ Suggested order of work
 5. ~~`ssh-agent` integration and the `login` command.~~ Done.
 6. ~~Serials, claim templates for principals, durable audit log~~ (done), TLS,
    integration tests.
-7. Host certificates; ~~CA backends file, PKCS#11, Vault, Azure Key Vault, AWS KMS~~
-   (done), then GCP KMS (with item 8).
-8. Serverless deployment per platform, each with its cloud KMS: ~~Azure Functions with
-   Key Vault, AWS Lambda with AWS KMS~~ (done), then Google Cloud Run functions with
-   Cloud KMS.
+7. Host certificates (all CA backends are done: file, PKCS#11, Vault, Azure Key Vault,
+   AWS KMS, GCP KMS).
+8. ~~Serverless deployment per platform, each with its cloud KMS~~ (done: Azure
+   Functions, AWS Lambda, Google Cloud Run). Still to do: tests against the real cloud
+   services, and workload identity federation for GCP.

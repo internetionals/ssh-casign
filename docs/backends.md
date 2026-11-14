@@ -11,14 +11,14 @@ Each backend is its own crate (`ssh-casign-ca-*`), depending only on the backend
 a build only contains what its platform needs. A configuration that names a backend the
 build lacks fails at startup with the feature to enable.
 
-| `provider`       | Feature             | Status  | Keys                                                  |
-|------------------|---------------------|---------|-------------------------------------------------------|
-| `file`           | `ca-file`           | done    | OpenSSH private key file (default feature)            |
-| `pkcs11`         | `ca-pkcs11`         | done    | YubiKey (ykcs11), smart cards (OpenSC), SoftHSM, HSMs |
-| `vault`          | `ca-vault`          | done    | OpenBao / HashiCorp Vault transit engine              |
-| `aws_kms`        | `ca-aws-kms`        | done    | AWS KMS                                               |
-| `azure_keyvault` | `ca-azure-keyvault` | done    | Azure Key Vault / Managed HSM                         |
-| `gcp_kms`        | `ca-gcp-kms`        | planned | Google Cloud KMS                                      |
+| `provider`       | Feature             | Status | Keys                                                  |
+|------------------|---------------------|--------|-------------------------------------------------------|
+| `file`           | `ca-file`           | done   | OpenSSH private key file (default feature)            |
+| `pkcs11`         | `ca-pkcs11`         | done   | YubiKey (ykcs11), smart cards (OpenSC), SoftHSM, HSMs |
+| `vault`          | `ca-vault`          | done   | OpenBao / HashiCorp Vault transit engine              |
+| `aws_kms`        | `ca-aws-kms`        | done   | AWS KMS                                               |
+| `azure_keyvault` | `ca-azure-keyvault` | done   | Azure Key Vault / Managed HSM                         |
+| `gcp_kms`        | `ca-gcp-kms`        | done   | Google Cloud KMS                                      |
 
 ```sh
 # standalone server with a YubiKey or HSM
@@ -27,9 +27,10 @@ cargo build --release -p ssh-casign-service --no-default-features --features ca-
 # with OpenBao / Vault, keeping file-based CAs available
 cargo build --release -p ssh-casign-service --features ca-vault
 
-# Azure Functions and AWS Lambda: static binaries, see deploy/
+# Azure Functions, AWS Lambda, Google Cloud Run: static binaries, see deploy/
 deploy/azure-functions/build.sh
 deploy/aws-lambda/build.sh
+deploy/gcp-cloud-run/build.sh
 ```
 
 TLS for outgoing connections (IdP, Vault, Key Vault) is a feature too: `tls-native`
@@ -43,14 +44,14 @@ Signature algorithms per backend
 An authority offers the algorithms that both its key and its backend support (see
 `signature_algorithms` in the README):
 
-| Backend        | Ed25519                                                   | ECDSA P-256/384/521 | `rsa-sha2-512/256`   | `ssh-rsa` (SHA-1)    |
-|----------------|-----------------------------------------------------------|---------------------|----------------------|----------------------|
-| file           | yes                                                       | yes                 | yes                  | yes                  |
-| pkcs11         | if the token has `CKM_EDDSA` (YubiKey 5.7+, SoftHSM 2.6+) | yes (`CKM_ECDSA`)   | yes (`CKM_RSA_PKCS`) | yes                  |
-| vault          | yes                                                       | yes                 | yes                  | yes                  |
-| aws_kms        | yes (`ECC_NIST_EDWARDS25519`)                             | yes                 | yes                  | no                   |
-| azure_keyvault | no                                                        | yes                 | yes                  | no                   |
-| GCP KMS        | yes                                                       | P-256/384           | yes                  | only raw-PKCS#1 keys |
+| Backend        | Ed25519                                                   | ECDSA P-256/384/521 | `rsa-sha2-512/256`   | `ssh-rsa` (SHA-1)                |
+|----------------|-----------------------------------------------------------|---------------------|----------------------|----------------------------------|
+| file           | yes                                                       | yes                 | yes                  | yes                              |
+| pkcs11         | if the token has `CKM_EDDSA` (YubiKey 5.7+, SoftHSM 2.6+) | yes (`CKM_ECDSA`)   | yes (`CKM_RSA_PKCS`) | yes                              |
+| vault          | yes                                                       | yes                 | yes                  | yes                              |
+| aws_kms        | yes (`ECC_NIST_EDWARDS25519`)                             | yes                 | yes                  | no                               |
+| azure_keyvault | no                                                        | yes                 | yes                  | no                               |
+| gcp_kms        | yes (`EC_SIGN_ED25519`)                                   | P-256/384           | yes                  | with `RSA_SIGN_RAW_PKCS1_*` keys |
 
 On platforms without SHA-1 support, profiles that need `ssh-rsa` must use an authority
 on another backend.
@@ -186,6 +187,39 @@ cert_types = ["user"]
   predates KMS Ed25519, so Ed25519 is covered by unit tests only.
 
 Deployment on AWS Lambda: [deploy/aws-lambda](../deploy/aws-lambda/README.md).
+
+`gcp_kms`
+---------
+
+```toml
+[authorities.gcp]
+provider = "gcp_kms"
+key_version = "projects/p/locations/europe-west1/keyRings/ssh/cryptoKeys/ca/cryptoKeyVersions/1"
+# credentials_file = "…"     # default: GOOGLE_APPLICATION_CREDENTIALS, gcloud, metadata server
+# endpoint_url = "…"         # default https://cloudkms.googleapis.com
+cert_types = ["user"]
+```
+
+- A Cloud KMS key version has a single algorithm, which decides what it offers:
+  `EC_SIGN_ED25519` → `ssh-ed25519` (the certificate is signed as is),
+  `EC_SIGN_P256_SHA256` / `EC_SIGN_P384_SHA384` → ECDSA, `RSA_SIGN_PKCS1_*_SHA256` →
+  `rsa-sha2-256`, `RSA_SIGN_PKCS1_4096_SHA512` → `rsa-sha2-512`. The raw keys
+  `RSA_SIGN_RAW_PKCS1_2048/3072/4096` sign a `DigestInfo` the service builds, so they
+  offer `rsa-sha2-512`, `rsa-sha2-256` and (when listed) `ssh-rsa`: the only cloud KMS
+  here that can serve SHA-1-only systems.
+- The key version is named explicitly (asymmetric keys have no primary version).
+- Credentials, in this order: `credentials_file` or `GOOGLE_APPLICATION_CREDENTIALS`
+  (a service account key, from which the service signs a JWT, or `authorized_user`
+  credentials), the gcloud credentials from `gcloud auth application-default login`,
+  the metadata server (Cloud Run, GCE, GKE; `GCE_METADATA_HOST` overrides).
+  Workload identity federation (`external_account`) isn't supported yet.
+- The identity needs `cloudkms.cryptoKeyVersions.useToSign` and `viewPublicKey` (role
+  `roles/cloudkms.signerVerifier`).
+- Google has no Cloud KMS emulator: tested against a mock of the documented REST API
+  (including raw PKCS#1 and service account JWTs) and with `sshd`, not yet against
+  Cloud KMS itself.
+
+Deployment on Google Cloud Run: [deploy/gcp-cloud-run](../deploy/gcp-cloud-run/README.md).
 
 Writing a backend
 -----------------

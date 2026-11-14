@@ -48,6 +48,11 @@ pub(crate) struct Config {
     /// the trusted proxy added), e.g. `x-forwarded-for` behind a load
     /// balancer or API gateway. Without it, the TCP peer address is used.
     pub(crate) client_address_header: Option<String>,
+    /// Entries at the end of `client_address_header` that further trusted
+    /// proxies add after the client address (e.g. 1 behind Google's external
+    /// load balancer, which appends its own address). Default 0.
+    #[serde(default)]
+    pub(crate) client_address_skip: usize,
     /// CEF header "Device Vendor".
     #[serde(default = "default_vendor")]
     device_vendor: String,
@@ -674,25 +679,34 @@ pub(crate) fn new_request_id() -> String {
     format!("{:032x}", rand::random::<u128>())
 }
 
-/// Client address: the rightmost entry of `header` if configured and
-/// present (the entry the trusted proxy added), else the TCP peer.
+/// Client address: from `header` if configured and present, the entry
+/// `skip` places from the right (the one the outermost trusted proxy added),
+/// else the TCP peer. Several header lines count as one list, in order.
 pub(crate) fn client_address(
     peer: SocketAddr,
     header: Option<&str>,
+    skip: usize,
     headers: &axum::http::HeaderMap,
 ) -> (IpAddr, Option<u16>) {
-    let forwarded = header
-        .and_then(|name| headers.get_all(name).iter().next_back())
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.rsplit(',').next())
-        .and_then(|entry| {
-            // Azure App Service / Functions add "IP:port".
-            let entry = entry.trim();
-            entry
-                .parse::<IpAddr>()
-                .ok()
-                .or_else(|| entry.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
-        });
+    let entries: Vec<String> = header
+        .map(|name| {
+            headers
+                .get_all(name)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .flat_map(|value| value.split(','))
+                .map(|entry| entry.trim().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let forwarded = entries.iter().rev().nth(skip).and_then(|entry| {
+        // Azure App Service / Functions add "IP:port".
+        let entry = entry.trim();
+        entry
+            .parse::<IpAddr>()
+            .ok()
+            .or_else(|| entry.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+    });
     match forwarded {
         Some(ip) => (ip, None),
         None => (peer.ip(), Some(peer.port())),
@@ -877,7 +891,7 @@ mod tests {
         let peer: SocketAddr = "10.0.0.1:443".parse().unwrap();
         let mut headers = axum::http::HeaderMap::new();
         assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), &headers),
+            client_address(peer, Some("x-forwarded-for"), 0, &headers),
             (peer.ip(), Some(443))
         );
         headers.insert(
@@ -885,23 +899,51 @@ mod tests {
             "203.0.113.9, 198.51.100.2".parse().unwrap(),
         );
         assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), &headers),
+            client_address(peer, Some("x-forwarded-for"), 0, &headers),
             ("198.51.100.2".parse().unwrap(), None)
         );
-        assert_eq!(client_address(peer, None, &headers), (peer.ip(), Some(443)));
+        assert_eq!(
+            client_address(peer, None, 0, &headers),
+            (peer.ip(), Some(443))
+        );
         headers.insert("x-forwarded-for", "203.0.113.9:54321".parse().unwrap());
         assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), &headers),
+            client_address(peer, Some("x-forwarded-for"), 0, &headers),
             ("203.0.113.9".parse().unwrap(), None)
         );
         headers.insert("x-forwarded-for", "[2001:db8::7]:443".parse().unwrap());
         assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), &headers),
+            client_address(peer, Some("x-forwarded-for"), 0, &headers),
             ("2001:db8::7".parse().unwrap(), None)
+        );
+        // Behind a load balancer that appends its own address: skip 1.
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.66, 203.0.113.9, 130.211.0.1".parse().unwrap(),
+        );
+        assert_eq!(
+            client_address(peer, Some("x-forwarded-for"), 1, &headers),
+            ("203.0.113.9".parse().unwrap(), None)
+        );
+        // Fewer entries than expected: someone bypassed the proxy; use the peer.
+        assert_eq!(
+            client_address(peer, Some("x-forwarded-for"), 5, &headers),
+            (peer.ip(), Some(443))
+        );
+        // Several header lines are one list.
+        headers.remove("x-forwarded-for");
+        headers.append("x-forwarded-for", "198.51.100.66".parse().unwrap());
+        headers.append(
+            "x-forwarded-for",
+            "203.0.113.9, 130.211.0.1".parse().unwrap(),
+        );
+        assert_eq!(
+            client_address(peer, Some("x-forwarded-for"), 1, &headers),
+            ("203.0.113.9".parse().unwrap(), None)
         );
         headers.insert("x-forwarded-for", "garbage".parse().unwrap());
         assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), &headers),
+            client_address(peer, Some("x-forwarded-for"), 0, &headers),
             (peer.ip(), Some(443))
         );
     }

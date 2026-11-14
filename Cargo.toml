@@ -5,6 +5,7 @@ members = [
 	"ssh-casign-ca-aws",
 	"ssh-casign-ca-azure",
 	"ssh-casign-ca-file",
+	"ssh-casign-ca-gcp",
 	"ssh-casign-ca-pkcs11",
 	"ssh-casign-ca-vault",
 	"ssh-casign-client",

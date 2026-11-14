@@ -2338,6 +2338,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssh-casign-ca-gcp"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "p256",
+ "p384",
+ "rand",
+ "reqwest",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
+ "ssh-casign-ca",
+ "ssh-key",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "ssh-casign-ca-pkcs11"
 version = "0.1.0"
 dependencies = [
@@ -2429,6 +2449,7 @@ dependencies = [
  "ssh-casign-ca-aws",
  "ssh-casign-ca-azure",
  "ssh-casign-ca-file",
+ "ssh-casign-ca-gcp",
  "ssh-casign-ca-pkcs11",
  "ssh-casign-ca-vault",
  "ssh-casign-core",

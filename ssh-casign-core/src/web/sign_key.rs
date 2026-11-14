@@ -131,12 +131,19 @@ pub(super) async fn sign_key(
     };
     let result = issue(&state, &claims, payload, &mut context).await;
 
-    let client_address_header = state
+    let (client_address_header, client_address_skip) = state
         .config
         .audit
         .as_ref()
-        .and_then(|audit| audit.client_address_header.as_deref());
-    let (client_ip, client_port) = audit::client_address(peer, client_address_header, &headers);
+        .map(|audit| {
+            (
+                audit.client_address_header.as_deref(),
+                audit.client_address_skip,
+            )
+        })
+        .unwrap_or_default();
+    let (client_ip, client_port) =
+        audit::client_address(peer, client_address_header, client_address_skip, &headers);
     let requester = audit::Requester {
         request_id: &request_id,
         client_ip,
