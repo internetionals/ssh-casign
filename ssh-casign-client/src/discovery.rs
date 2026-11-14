@@ -8,6 +8,8 @@ use crate::error::Result;
 pub(crate) struct Service {
     pub(crate) info: ServiceInfo,
     pub(crate) sign_endpoint: Url,
+    /// The KRL, if the service publishes one.
+    pub(crate) revocation_list: Option<Url>,
 }
 
 /// Fetch `<base_url>/.well-known/ssh-casign`.
@@ -30,8 +32,15 @@ pub(crate) async fn discover(http: &reqwest::Client, base_url: &Url) -> Result<S
     let sign_endpoint = discovery_url
         .join(&info.sign_endpoint)
         .wrap_err("Invalid sign_endpoint in service discovery document")?;
+    let revocation_list = info
+        .revocation_list
+        .as_deref()
+        .map(|list| discovery_url.join(list))
+        .transpose()
+        .wrap_err("Invalid revocation_list in service discovery document")?;
     Ok(Service {
         info,
         sign_endpoint,
+        revocation_list,
     })
 }

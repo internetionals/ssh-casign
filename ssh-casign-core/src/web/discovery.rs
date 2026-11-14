@@ -11,6 +11,8 @@ use ssh_casign_ca::Authorities as SshCaProviders;
 /// (`<base>/.well-known/ssh-casign`), so it also resolves correctly when the
 /// service is published under a path prefix behind a reverse proxy.
 const SIGN_ENDPOINT: &str = "../sign";
+/// The KRL, relative like the sign endpoint.
+const REVOCATION_LIST: &str = "../revoked.krl";
 
 pub(super) fn document(
     config: &Config,
@@ -38,9 +40,39 @@ pub(super) fn document(
         client_id: config.oidc_provider.client_id().to_string(),
         scopes: config.oidc_provider.scopes().to_vec(),
         sign_endpoint: SIGN_ENDPOINT.to_string(),
+        revocation_list: Some(REVOCATION_LIST.to_string()),
         authorities,
     };
     Ok(serde_json::to_string_pretty(&info)?)
+}
+
+/// `GET /revoked.krl`: the KRL, with an ETag so timers can ask whether it
+/// changed (`If-None-Match` gives 304).
+pub(super) async fn revocation_list(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    let snapshot = state.revocations.current();
+    let etag = snapshot.etag();
+    let cache = [
+        (header::ETAG, etag.to_string()),
+        (header::CACHE_CONTROL, DISCOVERY_MAX_AGE.to_string()),
+    ];
+    let unchanged = headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|tag| tag.trim() == etag || tag.trim() == "*");
+    if unchanged {
+        return (axum::http::StatusCode::NOT_MODIFIED, cache).into_response();
+    }
+    (
+        cache,
+        [(header::CONTENT_TYPE, "application/octet-stream".to_string())],
+        snapshot.krl().to_vec(),
+    )
+        .into_response()
 }
 
 /// How long clients and caches may keep the discovery document. Short, so

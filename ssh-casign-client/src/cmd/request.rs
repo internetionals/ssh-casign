@@ -160,7 +160,7 @@ impl RequestArgs {
     }
 }
 
-fn runtime() -> Result<tokio::runtime::Runtime> {
+pub(super) fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

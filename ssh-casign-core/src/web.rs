@@ -26,6 +26,10 @@ pub(crate) async fn main(
             axum::routing::get(discovery::discovery),
         )
         .route(
+            "/revoked.krl",
+            axum::routing::get(discovery::revocation_list),
+        )
+        .route(
             "/sign",
             // Including the token check's rejections: nothing from /sign may
             // be kept by a proxy or CDN.

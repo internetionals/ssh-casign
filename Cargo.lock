@@ -2425,6 +2425,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "ssh-casign-ca",
  "ssh-casign-proto",
  "ssh-key",

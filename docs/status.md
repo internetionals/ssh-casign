@@ -30,6 +30,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Google Cloud Run                       |  ✅   | distroless image in deploy/gcp-cloud-run                 |
 | User certificates                      |  ✅   |                                                          |
 | Host certificates                      |  ✅   | machine, admin and orchestrator routes (docs/hosts.md)   |
+| Revocation (KRL)                       |  🟡   | revocation file → `/revoked.krl`; API later              |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
 | Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |
 | Behind proxies and CDNs                |  ✅   | `trusted_proxies`, XFF/RFC 7239/CF headers, `CF-Ray`     |
@@ -194,7 +195,9 @@ Suggested order of work
 6. ~~Serials, claim templates for principals, durable audit log~~ (done), TLS,
    integration tests.
 7. ~~Host certificates~~ (done: machines, administrators and orchestrators; all CA
-   backends are done too). Still to do: a host-key revocation story (KRL).
+   backends are done too).
+9. ~~Revocation from a file, served as a KRL~~ (done, docs/revocation.md). Next: a
+   revoke API with storage backends, so revoking doesn't need a file change.
 8. ~~Serverless deployment per platform, each with its cloud KMS~~ (done: Azure
    Functions, AWS Lambda, Google Cloud Run). Still to do: tests against the real cloud
    services, and workload identity federation for GCP.

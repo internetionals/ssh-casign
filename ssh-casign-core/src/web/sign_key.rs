@@ -254,6 +254,10 @@ async fn issue(
     policies
         .check_public_key(&client_public_key)
         .map_err(|err| Failure::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    let revocations = state.revocations.current();
+    if revocations.key_revoked(&client_public_key) {
+        return Err(Failure::new(StatusCode::FORBIDDEN, "This key is revoked"));
+    }
     let resolved = policies.resolve(&request, cert_type).map_err(|err| {
         let message = err.to_string();
         if matches!(err, policy::Error::Conflict(_) | policy::Error::NoValidity) {
@@ -287,6 +291,13 @@ async fn issue(
             format!("profile {}: {err}", profile.name),
         )
     })?;
+    // A certificate with a revoked key ID would be refused everywhere.
+    if revocations.key_id_revoked(authority, &key_id) {
+        return Err(Failure::new(
+            StatusCode::FORBIDDEN,
+            format!("Key ID {key_id} is revoked"),
+        ));
+    }
     let options = resolved.into_options(client_public_key, cert_type, serial, key_id);
 
     let signed = provider.issue(&options, algorithm).await?;

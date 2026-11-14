@@ -9,6 +9,7 @@ mod audit;
 mod certificate;
 mod config;
 mod proxy;
+mod revocation;
 mod web;
 
 pub use config::Config;

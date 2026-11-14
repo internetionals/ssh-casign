@@ -344,6 +344,49 @@ pub fn select<'a>(
 pub mod testing {
     use super::*;
 
+    /// A backend that has an Ed25519 key but never signs.
+    struct UnusedBackend(KeyData);
+
+    impl Backend for UnusedBackend {
+        fn describe(&self) -> String {
+            "unused test backend".into()
+        }
+        fn public_key(&self) -> &KeyData {
+            &self.0
+        }
+        fn algorithms(&self) -> Vec<SignatureAlgorithm> {
+            vec![SignatureAlgorithm::Ed25519]
+        }
+        fn sign<'a>(
+            &'a self,
+            _: SignatureAlgorithm,
+            _: &'a [u8],
+        ) -> BoxFuture<'a, Result<Vec<u8>, BackendError>> {
+            Box::pin(async { Err(BackendError::new("test backend doesn't sign")) })
+        }
+    }
+
+    /// Authorities with these names (Ed25519 keys from fixed seeds), signing
+    /// user and host certificates, for tests that need names and public keys.
+    pub fn authorities(names: &[&str]) -> Authorities {
+        names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let key = KeyData::Ed25519(
+                    ssh_key::private::Ed25519Keypair::from_seed(&[index as u8 + 100; 32]).public,
+                );
+                let authority = Authority {
+                    public_key: PublicKey::from(key.clone()),
+                    backend: Box::new(UnusedBackend(key)),
+                    cert_types: vec![CertType::User, CertType::Host],
+                    signature_algorithms: vec![SignatureAlgorithm::Ed25519],
+                };
+                (Arc::from(*name), Arc::new(authority))
+            })
+            .collect()
+    }
+
     /// A certificate request for an Ed25519 user key with principal `alice`.
     pub fn options() -> CertificateOptions {
         let user = ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]);

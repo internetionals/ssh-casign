@@ -81,6 +81,7 @@ mod tests {
             client_id: "c".into(),
             scopes: vec![],
             sign_endpoint: "../sign".into(),
+            revocation_list: None,
             authorities: [
                 (
                     "users".to_string(),

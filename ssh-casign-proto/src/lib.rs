@@ -80,6 +80,11 @@ pub struct ServiceInfo {
     pub scopes: Vec<String>,
     /// Sign endpoint; may be relative to the discovery document URL.
     pub sign_endpoint: String,
+    /// The KRL (OpenSSH key revocation list) of the service's authorities,
+    /// for sshd's `RevokedKeys` and ssh's `RevokedHostKeys`; may be relative
+    /// to the discovery document URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_list: Option<String>,
     /// Signing authorities, so clients and servers can set up trust.
     #[serde(default)]
     pub authorities: BTreeMap<String, AuthorityInfo>,

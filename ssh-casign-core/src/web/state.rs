@@ -11,6 +11,8 @@ pub(super) struct AppState {
     /// Pre-serialized discovery document (it only depends on the config).
     pub(super) discovery_document: String,
     pub(super) audit: Option<Arc<crate::audit::AuditLog>>,
+    /// Revoked certificates and keys, and the KRL.
+    pub(super) revocations: Arc<crate::revocation::Revocations>,
     /// Client address and correlation ID behind proxies.
     pub(super) origin: crate::proxy::Resolver,
 }
@@ -26,6 +28,8 @@ impl AppState {
         let issuers = super::oidc::Issuers::load(&config.oidc_provider, &config.issuers).await?;
         config.profiles.check(&issuers, &authorities)?;
         let discovery_document = super::discovery::document(&config, &authorities)?;
+        let revocations =
+            crate::revocation::Revocations::start(config.revocation.as_ref(), &authorities)?;
         let audit = match &config.audit {
             Some(audit) => Some(audit.open(&server_id)?),
             None => {
@@ -45,6 +49,7 @@ impl AppState {
             discovery_document,
             audit,
             origin,
+            revocations,
         }))
     }
 }

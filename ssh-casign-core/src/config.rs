@@ -17,6 +17,8 @@ pub struct Config {
     pub(crate) issuers: std::collections::BTreeMap<String, crate::web::oidc::IssuerConfig>,
     pub(crate) profiles: crate::certificate::profiles::Profiles,
     pub(crate) authorities: ssh_casign_ca::Config,
+    /// Revoked certificates and keys; without it, the KRL is empty.
+    pub(crate) revocation: Option<crate::revocation::Config>,
     /// Audit log; without it, issued certificates are only in the service log.
     pub(crate) audit: Option<crate::audit::Config>,
 }

@@ -5,6 +5,7 @@ use url::Url;
 mod ca_keys;
 mod cert;
 mod host;
+mod krl;
 mod login;
 mod logout;
 mod request;
@@ -26,6 +27,8 @@ enum Cmd {
     Host(host::Args),
     /// Print the service's CA keys (for TrustedUserCAKeys or known_hosts)
     CaKeys(ca_keys::Args),
+    /// Fetch the service's revocation list (for RevokedKeys or RevokedHostKeys)
+    Krl(krl::Args),
 }
 
 #[derive(Parser)]
@@ -119,6 +122,7 @@ pub(crate) fn run_with_config(args: &Args, config: &Config) -> CmdResult {
         Cmd::Logout(logout_args) => logout::run(logout_args, &target),
         Cmd::Host(host_args) => host::run(host_args, &target),
         Cmd::CaKeys(ca_keys_args) => ca_keys::run(ca_keys_args, &target),
+        Cmd::Krl(krl_args) => krl::run(krl_args, &target),
     }
 }
 

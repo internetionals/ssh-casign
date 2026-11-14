@@ -198,6 +198,10 @@ ssh-casign-client ca-keys --type user > /etc/ssh/trusted-user-ca-keys
 `--hosts` is a `known_hosts` pattern list (`*.example.com,10.0.0.*`). Keep it as narrow
 as the names the host profiles allow.
 
+To withdraw a host certificate before it expires (a decommissioned or compromised
+host), revoke it and let clients fetch the KRL for `RevokedHostKeys`; see
+[revocation.md](revocation.md).
+
 Setting up a host
 -----------------
 

@@ -71,6 +71,7 @@ only the service URL:
   "client_id": "ssh-casign",
   "scopes": ["openid", "profile"],
   "sign_endpoint": "../sign",
+  "revocation_list": "../revoked.krl",
   "authorities": {
     "default": { "public_key": "ssh-ed25519 AAAA...", "cert_types": ["user"] }
   }
@@ -81,6 +82,9 @@ only the service URL:
 correctly when the service is published under a path prefix. `authorities` lists the CA
 public keys, for `TrustedUserCAKeys` on servers or `@cert-authority` lines in
 `known_hosts`.
+
+`GET /revoked.krl` returns the KRL (OpenSSH key revocation list) for `RevokedKeys` and
+`RevokedHostKeys`; see [docs/revocation.md](docs/revocation.md).
 
 `POST /sign`, with header `Authorization: Bearer <JWT>`:
 
@@ -128,6 +132,14 @@ that signs for the hosts it manages (names requested, limited by
 `matching_principals`). The client's `host` command renews a machine's certificates
 from a timer, and `ca-keys` prints the `@cert-authority` lines for `known_hosts`. See
 [docs/hosts.md](docs/hosts.md).
+
+### Revocation
+
+Revoked certificates (by serial or key ID) and keys (by fingerprint) are listed in a
+revocation file, which the service reloads when it changes. It serves them as a KRL,
+refuses to sign revoked keys, and the client's `krl` command keeps
+`/etc/ssh/revoked.krl` up to date from a timer. See
+[docs/revocation.md](docs/revocation.md).
 
 ### CA key backends
 
@@ -300,9 +312,11 @@ ssh-casign-client [OPTIONS] logout [--keep-agent]
 ssh-casign-client [OPTIONS] cert [-t user|host] [-o FILE] [REQUEST OPTIONS] [PUBLIC_KEY_FILE]
 ssh-casign-client [OPTIONS] host [-n NAME] [--renew-before DURATION] [--on-change CMD] [KEY.pub ...]
 ssh-casign-client [OPTIONS] ca-keys [-t user|host] [--hosts PATTERN]
+ssh-casign-client [OPTIONS] krl -o FILE [--on-change CMD]
 ```
 
-`host` and `ca-keys` are described in [docs/hosts.md](docs/hosts.md), together with
+`krl` fetches the revocation list ([docs/revocation.md](docs/revocation.md)). `host`
+and `ca-keys` are described in [docs/hosts.md](docs/hosts.md), together with
 the non-interactive sign-in methods for machines (`client-credentials`, `token-file`,
 `gcp-metadata`, `azure-managed-identity`, `github-actions`).
 
