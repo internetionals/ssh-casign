@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer};
 use ssh_key::{certificate::CertType, public::KeyData, PublicKey};
 
-use super::options::CertificateOptions;
+use ssh_casign_ca::CertificateOptions;
 
 /// Extensions `ssh-keygen -s` adds to user certificates by default. Used as
 /// the last-resort default when no source specifies extensions.

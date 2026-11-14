@@ -5,9 +5,12 @@ pub(crate) mod oidc;
 pub(crate) mod sign_key;
 pub(crate) mod state;
 
-pub(crate) async fn main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn main(
+    config: Config,
+    registry: &ssh_casign_ca::Registry,
+) -> Result<(), Box<dyn std::error::Error>> {
     let listen = config.listen();
-    let app_state = state::AppState::new(config).await?;
+    let app_state = state::AppState::new(config, registry).await?;
 
     let app = axum::Router::new()
         .route(

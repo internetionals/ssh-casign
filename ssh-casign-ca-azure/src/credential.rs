@@ -26,7 +26,7 @@ const RENEW_MARGIN: Duration = Duration::from_secs(300);
 
 #[derive(Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CredentialKind {
+pub enum CredentialKind {
     #[default]
     Auto,
     ManagedIdentity,
@@ -36,19 +36,19 @@ pub(crate) enum CredentialKind {
 
 /// Credential settings, flattened into a backend's config.
 #[derive(Deserialize, Clone, Default)]
-pub(crate) struct CredentialConfig {
+pub struct CredentialConfig {
     #[serde(default)]
-    pub(crate) credential: CredentialKind,
+    pub credential: CredentialKind,
     /// Client ID: of a user-assigned managed identity, or of the app
     /// registration (default: `AZURE_CLIENT_ID`).
-    pub(crate) client_id: Option<String>,
+    pub client_id: Option<String>,
     /// Tenant (default: `AZURE_TENANT_ID`).
-    pub(crate) tenant_id: Option<String>,
+    pub tenant_id: Option<String>,
     /// File with the client secret (default: `AZURE_CLIENT_SECRET`).
-    pub(crate) client_secret_file: Option<PathBuf>,
+    pub client_secret_file: Option<PathBuf>,
     /// Entra ID endpoint (default: `AZURE_AUTHORITY_HOST`, else
     /// `https://login.microsoftonline.com`; other clouds differ).
-    pub(crate) authority_host: Option<String>,
+    pub authority_host: Option<String>,
 }
 
 fn env(name: &str) -> Option<String> {
@@ -90,7 +90,7 @@ impl Source {
 }
 
 /// Tokens for one resource (e.g. `https://vault.azure.net`).
-pub(crate) struct Credential {
+pub struct Credential {
     http: reqwest::Client,
     source: Source,
     resource: String,
@@ -114,11 +114,7 @@ fn number(value: &serde_json::Value) -> Option<u64> {
 }
 
 impl CredentialConfig {
-    pub(crate) fn credential(
-        &self,
-        http: reqwest::Client,
-        resource: &str,
-    ) -> Result<Credential, String> {
+    pub fn credential(&self, http: reqwest::Client, resource: &str) -> Result<Credential, String> {
         let client_id = self.client_id.clone().or_else(|| env("AZURE_CLIENT_ID"));
         let tenant = self.tenant_id.clone().or_else(|| env("AZURE_TENANT_ID"));
         let authority = self
@@ -197,12 +193,12 @@ impl CredentialConfig {
 }
 
 impl Credential {
-    pub(crate) fn describe(&self) -> &'static str {
+    pub fn describe(&self) -> &'static str {
         self.source.describe()
     }
 
     /// A valid access token, from the cache or freshly requested.
-    pub(crate) async fn token(&self) -> Result<String, String> {
+    pub async fn token(&self) -> Result<String, String> {
         if let Some((token, expires)) = self
             .cached
             .lock()

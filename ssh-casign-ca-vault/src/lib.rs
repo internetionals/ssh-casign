@@ -1,4 +1,4 @@
-//! CA key in the transit secrets engine of OpenBao or HashiCorp Vault.
+//! ssh-casign CA backend: CA key in the transit secrets engine of OpenBao or HashiCorp Vault.
 //!
 //! The key never leaves Vault; the service asks Vault to sign. Supported key
 //! types: `ed25519`, `ecdsa-p256`, `ecdsa-p384`, `ecdsa-p521`, `rsa-2048`,
@@ -9,13 +9,27 @@
 //! `key_version`), so the advertised public key always matches the
 //! signatures; after rotating the key in Vault, restart the service.
 
+#[cfg(not(any(feature = "native-tls", feature = "rustls")))]
+compile_error!("enable a TLS feature: native-tls (default) or rustls");
+
 use std::{path::PathBuf, time::Duration};
 
 use base64ct::{Base64, Encoding as _};
 use serde::Deserialize;
 use ssh_key::public::{EcdsaPublicKey, Ed25519PublicKey, KeyData, RsaPublicKey};
 
-use super::{encoding, signing::SignatureAlgorithm, Backend, BackendError, BoxFuture};
+use ssh_casign_ca::{encoding, Backend, BackendError, BoxFuture, SignatureAlgorithm};
+
+/// The `provider` name of this backend.
+pub const PROVIDER: &str = "vault";
+
+/// [`ssh_casign_ca::Loader`] for this backend.
+pub fn load(config: toml::Table) -> BoxFuture<'static, Result<Box<dyn Backend>, String>> {
+    Box::pin(async move {
+        let config: Config = ssh_casign_ca::parse_config(config)?;
+        Ok(Box::new(config.open().await?) as Box<dyn Backend>)
+    })
+}
 
 fn default_mount() -> String {
     "transit".to_string()
@@ -23,7 +37,7 @@ fn default_mount() -> String {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Config {
+struct Config {
     /// e.g. `https://vault.example.com:8200`
     address: String,
     /// Mount path of the transit engine.
@@ -110,7 +124,7 @@ fn public_key(key_type: &str, public_key: &str) -> Result<KeyData, String> {
 }
 
 impl Config {
-    pub(super) async fn load(&self) -> Result<VaultKey, String> {
+    async fn open(&self) -> Result<VaultKey, String> {
         let token = match &self.token_file {
             Some(file) => std::fs::read_to_string(file)
                 .map_err(|err| format!("token file {}: {err}", file.display()))?,
@@ -285,7 +299,7 @@ impl Backend for VaultKey {
     }
 }
 
-#[cfg(all(test, feature = "ca-file"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -295,11 +309,11 @@ mod tests {
         assert_eq!(ed25519, KeyData::Ed25519(Ed25519PublicKey([7; 32])));
 
         use rsa::pkcs8::EncodePublicKey;
-        let key = ssh_key::PrivateKey::from_openssh(include_str!("testdata/rsa-ca")).unwrap();
+        let key = ssh_key::PrivateKey::from_openssh(ssh_casign_ca::testing::RSA_CA).unwrap();
         let ssh_key::private::KeypairData::Rsa(keypair) = key.key_data() else {
             unreachable!()
         };
-        let private = super::super::file::rsa_private_key(keypair).unwrap();
+        let private = ssh_casign_ca::encoding::rsa_private_key(keypair).unwrap();
         let pem = rsa::RsaPublicKey::from(&private)
             .to_public_key_pem(Default::default())
             .unwrap();

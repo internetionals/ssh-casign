@@ -2268,6 +2268,85 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssh-casign-ca"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "rand",
+ "rsa",
+ "serde",
+ "sha1",
+ "sha2",
+ "ssh-casign-proto",
+ "ssh-encoding",
+ "ssh-key",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "ssh-casign-ca-azure"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "ssh-casign-ca",
+ "ssh-key",
+ "toml",
+]
+
+[[package]]
+name = "ssh-casign-ca-file"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "rand",
+ "rsa",
+ "serde",
+ "sha1",
+ "sha2",
+ "signature",
+ "ssh-casign-ca",
+ "ssh-key",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "ssh-casign-ca-pkcs11"
+version = "0.1.0"
+dependencies = [
+ "cryptoki",
+ "serde",
+ "ssh-casign-ca",
+ "ssh-key",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "ssh-casign-ca-vault"
+version = "0.1.0"
+dependencies = [
+ "base64ct",
+ "p256",
+ "p384",
+ "p521",
+ "reqwest",
+ "rsa",
+ "serde",
+ "serde_json",
+ "ssh-casign-ca",
+ "ssh-key",
+ "toml",
+]
+
+[[package]]
 name = "ssh-casign-client"
 version = "0.1.0"
 dependencies = [
@@ -2292,6 +2371,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssh-casign-core"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-extra",
+ "libc",
+ "oidc-jwt-validator",
+ "rand",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "ssh-casign-ca",
+ "ssh-casign-proto",
+ "ssh-key",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "ssh-casign-proto"
 version = "0.1.0"
 dependencies = [
@@ -2302,28 +2403,13 @@ dependencies = [
 name = "ssh-casign-service"
 version = "0.1.0"
 dependencies = [
- "axum",
- "axum-extra",
- "base64ct",
- "cryptoki",
- "libc",
- "oidc-jwt-validator",
- "p256",
- "p384",
- "p521",
- "rand",
- "regex",
  "reqwest",
- "rsa",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "signature",
- "ssh-casign-proto",
- "ssh-encoding",
- "ssh-key",
- "thiserror 2.0.21",
+ "ssh-casign-ca",
+ "ssh-casign-ca-azure",
+ "ssh-casign-ca-file",
+ "ssh-casign-ca-pkcs11",
+ "ssh-casign-ca-vault",
+ "ssh-casign-core",
  "tokio",
  "toml",
  "tracing",

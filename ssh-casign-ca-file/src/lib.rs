@@ -1,72 +1,61 @@
-//! CA key in an OpenSSH private key file (unencrypted).
+//! ssh-casign CA backend: CA key in an OpenSSH private key file (unencrypted).
+//!
+//! ```toml
+//! [authorities.ed25519]
+//! provider = "file"
+//! private_key_file = "/etc/ssh-casign/ca"
+//! cert_types = ["user"]
+//! ```
 
 use rsa::{
     pkcs1v15,
     signature::{SignatureEncoding, Signer as _},
 };
 use serde::Deserialize;
+use ssh_casign_ca::{
+    encoding::rsa_private_key, Backend, BackendError, BoxFuture, SignatureAlgorithm,
+};
 use ssh_key::{private::KeypairData, public::KeyData, PrivateKey};
 use std::path::PathBuf;
 
-use super::{signing::SignatureAlgorithm, Backend, BackendError, BoxFuture};
+/// The `provider` name of this backend.
+pub const PROVIDER: &str = "file";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Config {
+struct Config {
     private_key_file: PathBuf,
 }
 
-impl Config {
-    pub(super) fn load(&self) -> Result<FileKey, String> {
-        let key = PrivateKey::read_openssh_file(&self.private_key_file).map_err(|err| {
-            format!(
-                "failed to read CA private key {}: {err}",
-                self.private_key_file.display()
-            )
-        })?;
-        let rsa = match key.key_data() {
-            KeypairData::Rsa(keypair) => Some(rsa_private_key(keypair)?),
-            _ => None,
-        };
-        Ok(FileKey {
-            path: self.private_key_file.clone(),
-            key,
-            rsa,
-        })
-    }
+/// [`ssh_casign_ca::Loader`] for this backend.
+pub fn load(config: toml::Table) -> BoxFuture<'static, Result<Box<dyn Backend>, String>> {
+    Box::pin(async move {
+        let config: Config = ssh_casign_ca::parse_config(config)?;
+        Ok(Box::new(FileKey::load(config.private_key_file)?) as Box<dyn Backend>)
+    })
 }
 
-/// The `rsa` crate's private key for an ssh-key RSA keypair.
-///
-/// Not `rsa::RsaPrivateKey::try_from(keypair)`: ssh-key 0.6.7 passes the
-/// prime `p` twice instead of `p` and `q` there, which the `rsa` crate (since
-/// it validates keys in `from_components`) rejects. That also breaks
-/// ssh-key's own RSA signing, so RSA signing is done here.
-pub(crate) fn rsa_private_key(
-    keypair: &ssh_key::private::RsaKeypair,
-) -> Result<rsa::RsaPrivateKey, String> {
-    let uint = |mpint: &ssh_key::Mpint| {
-        mpint
-            .as_positive_bytes()
-            .map(rsa::BigUint::from_bytes_be)
-            .ok_or_else(|| "invalid RSA key".to_string())
-    };
-    rsa::RsaPrivateKey::from_components(
-        uint(&keypair.public.n)?,
-        uint(&keypair.public.e)?,
-        uint(&keypair.private.d)?,
-        vec![uint(&keypair.private.p)?, uint(&keypair.private.q)?],
-    )
-    .map_err(|err| format!("invalid RSA key: {err}"))
-}
-
-pub(crate) struct FileKey {
+pub struct FileKey {
     path: PathBuf,
     key: PrivateKey,
     rsa: Option<rsa::RsaPrivateKey>,
 }
 
 impl FileKey {
+    pub fn load(path: PathBuf) -> Result<Self, String> {
+        let key = PrivateKey::read_openssh_file(&path)
+            .map_err(|err| format!("failed to read CA private key {}: {err}", path.display()))?;
+        Self::new(path, key)
+    }
+
+    pub fn new(path: PathBuf, key: PrivateKey) -> Result<Self, String> {
+        let rsa = match key.key_data() {
+            KeypairData::Rsa(keypair) => Some(rsa_private_key(keypair)?),
+            _ => None,
+        };
+        Ok(Self { path, key, rsa })
+    }
+
     fn sign_now(
         &self,
         algorithm: SignatureAlgorithm,
@@ -132,53 +121,23 @@ impl Backend for FileKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        authority::{encoding, signing},
-        certificate::options::CertificateOptions,
-    };
-    use base64ct::{Base64, Encoding as _};
+    use ssh_casign_ca::{encoding, signing, testing};
 
-    /// A fixed RSA key (generated with ssh-keygen; only used by tests), so the
-    /// tests don't spend seconds generating RSA keys.
     fn rsa_ca() -> FileKey {
-        let key = PrivateKey::from_openssh(include_str!("testdata/rsa-ca")).unwrap();
-        let KeypairData::Rsa(keypair) = key.key_data() else {
-            unreachable!()
-        };
-        let rsa = Some(rsa_private_key(keypair).unwrap());
-        FileKey {
-            path: "testdata/rsa-ca".into(),
-            key,
-            rsa,
-        }
+        let key = PrivateKey::from_openssh(testing::RSA_CA).unwrap();
+        FileKey::new("testdata/rsa-ca".into(), key).unwrap()
     }
 
-    fn file_key(key: PrivateKey) -> FileKey {
-        FileKey {
-            path: "test".into(),
-            key,
-            rsa: None,
-        }
-    }
-
-    fn options() -> CertificateOptions {
-        let user = ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]);
-        let mut options =
-            CertificateOptions::new_user(ssh_key::PublicKey::from(KeyData::Ed25519(user.public)));
-        options.add_principal("alice");
-        options.set_validity(3600);
-        options.set_serial(7);
-        options.set_key_id("test");
-        options
+    fn ed25519_ca() -> FileKey {
+        let key = PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[2; 32]));
+        FileKey::new("test".into(), key).unwrap()
     }
 
     /// Issue with each algorithm; `signing::issue` verifies every signature.
     #[tokio::test]
     async fn issues_with_every_algorithm_of_each_key_type() {
-        let ed25519 = file_key(PrivateKey::from(
-            ssh_key::private::Ed25519Keypair::from_seed(&[2; 32]),
-        ));
-        let ecdsa = file_key(
+        let ecdsa = FileKey::new(
+            "test".into(),
             PrivateKey::random(
                 &mut rand::rngs::OsRng,
                 ssh_key::Algorithm::Ecdsa {
@@ -186,25 +145,26 @@ mod tests {
                 },
             )
             .unwrap(),
-        );
-        let rsa = rsa_ca();
+        )
+        .unwrap();
         for (backend, expected) in [
-            (&ed25519, vec!["ssh-ed25519"]),
+            (&ed25519_ca(), vec!["ssh-ed25519"]),
             (&ecdsa, vec!["ecdsa-sha2-nistp384"]),
-            (&rsa, vec!["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]),
+            (&rsa_ca(), vec!["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]),
         ] {
             let algorithms = backend.algorithms();
             assert_eq!(
                 algorithms.iter().map(|a| a.as_str()).collect::<Vec<_>>(),
                 expected
             );
+            testing::issue_with_every_algorithm(backend).await.unwrap();
             for algorithm in algorithms {
-                let signed = signing::issue(backend, &options(), algorithm)
+                let signed = signing::issue(backend, &testing::options(), algorithm)
                     .await
                     .unwrap();
-                assert_eq!(signed.certificate.serial(), 7);
-                assert_eq!(signed.certificate.valid_principals(), ["alice"]);
-                let blob = Base64::decode_vec(signed.openssh.split(' ').nth(1).unwrap()).unwrap();
+                use base64ct::Encoding as _;
+                let blob = base64ct::Base64::decode_vec(signed.openssh.split(' ').nth(1).unwrap())
+                    .unwrap();
                 let name = algorithm.as_str().as_bytes();
                 assert!(
                     blob.windows(name.len() + 4)
@@ -217,14 +177,13 @@ mod tests {
 
     #[tokio::test]
     async fn wrong_algorithm_for_key_fails() {
-        let ed25519 = file_key(PrivateKey::from(
-            ssh_key::private::Ed25519Keypair::from_seed(&[2; 32]),
-        ));
-        assert!(
-            signing::issue(&ed25519, &options(), SignatureAlgorithm::RsaSha256)
-                .await
-                .is_err()
-        );
+        assert!(signing::issue(
+            &ed25519_ca(),
+            &testing::options(),
+            SignatureAlgorithm::RsaSha256
+        )
+        .await
+        .is_err());
     }
 
     /// The DigestInfo that raw-RSA backends (PKCS#11) sign must give exactly
@@ -248,5 +207,16 @@ mod tests {
                 "{algorithm}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn loader_reads_its_config() {
+        let mut config = toml::Table::new();
+        config.insert("private_key_file".into(), "/nonexistent".into());
+        let err = load(config).await.err().unwrap();
+        assert!(err.contains("/nonexistent"), "{err}");
+        let mut config = toml::Table::new();
+        config.insert("bogus".into(), 1.into());
+        assert!(load(config).await.is_err());
     }
 }

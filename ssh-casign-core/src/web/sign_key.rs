@@ -8,9 +8,10 @@ use axum::{
 };
 use ssh_casign_proto::{CertType, ErrorResponse, SignKeyRequest, SignedKeyResponse};
 
+use ssh_casign_ca::{self as authority_crate, SignError, SignatureAlgorithm};
+
 use crate::{
     audit,
-    authority::{self, signing::SignatureAlgorithm, SignError},
     certificate::{
         key_id,
         policy::{self, Policies, Policy},
@@ -258,7 +259,7 @@ async fn issue(
         .fingerprint(Default::default())
         .to_string();
     let key_type = client_public_key.algorithm().as_str().to_string();
-    let (authority, provider, algorithm) = authority::select(
+    let (authority, provider, algorithm) = authority_crate::select(
         profile.settings.authorities(),
         &state.authorities,
         accepted_algorithms.as_deref(),

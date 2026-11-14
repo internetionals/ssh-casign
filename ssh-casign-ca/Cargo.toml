@@ -1,0 +1,22 @@
+[package]
+name = "ssh-casign-ca"
+version = "0.1.0"
+edition = "2021"
+description = "SSH certificate authorities with pluggable key backends"
+
+[dependencies]
+base64ct = { version = "1.8.3", features = ["alloc"] }
+rand = "0.8.5"
+rsa = "0.9.10"
+serde = { version = "1.0.214", features = ["derive", "rc"] }
+sha1 = { version = "0.10.7", features = ["oid"] }
+sha2 = { version = "0.10.9", features = ["oid"] }
+ssh-casign-proto = { path = "../ssh-casign-proto" }
+ssh-encoding = { version = "0.2.0", features = ["alloc"] }
+ssh-key = { version = "0.6.7", features = ["p256", "p384", "p521", "ed25519", "rsa"] }
+thiserror = "2.0.3"
+toml = "0.8.19"
+tracing = "0.1.40"
+
+[dev-dependencies]
+tokio = { version = "1.41.1", features = ["macros", "rt"] }

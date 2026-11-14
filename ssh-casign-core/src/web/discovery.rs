@@ -4,7 +4,8 @@ use axum::{extract::State, http::header, response::IntoResponse};
 use ssh_casign_proto::{AuthorityInfo, ServiceInfo};
 
 use super::state::AppState;
-use crate::{authority::SshCaProviders, config::Config};
+use crate::config::Config;
+use ssh_casign_ca::Authorities as SshCaProviders;
 
 /// Sign endpoint relative to the discovery document URL
 /// (`<base>/.well-known/ssh-casign`), so it also resolves correctly when the

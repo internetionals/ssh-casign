@@ -1,4 +1,4 @@
-//! CA key on a PKCS#11 token: YubiKey (ykcs11), smart cards (OpenSC), SoftHSM
+//! ssh-casign CA backend: CA key on a PKCS#11 token: YubiKey (ykcs11), smart cards (OpenSC), SoftHSM
 //! or a network HSM.
 //!
 //! The private key never leaves the token. Ed25519 uses `CKM_EDDSA`, ECDSA
@@ -26,13 +26,24 @@ use cryptoki::{
 use serde::Deserialize;
 use ssh_key::public::{EcdsaPublicKey, Ed25519PublicKey, KeyData, RsaPublicKey};
 
-use super::{encoding, signing::SignatureAlgorithm, Backend, BackendError, BoxFuture};
+use ssh_casign_ca::{encoding, Backend, BackendError, BoxFuture, SignatureAlgorithm};
 
 const PIN_ENV: &str = "SSH_CASIGN_PKCS11_PIN";
 
+/// The `provider` name of this backend.
+pub const PROVIDER: &str = "pkcs11";
+
+/// [`ssh_casign_ca::Loader`] for this backend.
+pub fn load(config: toml::Table) -> BoxFuture<'static, Result<Box<dyn Backend>, String>> {
+    Box::pin(async move {
+        let config: Config = ssh_casign_ca::parse_config(config)?;
+        Ok(Box::new(config.open().await?) as Box<dyn Backend>)
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Config {
+struct Config {
     /// PKCS#11 module, e.g. `/usr/lib/softhsm/libsofthsm2.so`,
     /// `opensc-pkcs11.so` or `libykcs11.so`.
     module: PathBuf,
@@ -168,7 +179,7 @@ fn bytes(attribute: Attribute) -> Result<Vec<u8>, String> {
 }
 
 impl Config {
-    pub(super) async fn load(&self) -> Result<Pkcs11Key, String> {
+    async fn open(&self) -> Result<Pkcs11Key, String> {
         let config = Config {
             module: self.module.clone(),
             token_label: self.token_label.clone(),
@@ -441,7 +452,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "needs a PKCS#11 module; see the doc comment"]
     async fn issues_with_a_real_token() {
-        use crate::{authority::signing, certificate::options::CertificateOptions};
+        use ssh_casign_ca::{signing, CertificateOptions};
         let module = std::env::var("PKCS11_TEST_MODULE").expect("PKCS11_TEST_MODULE");
         let token = std::env::var("PKCS11_TEST_TOKEN").ok();
         let user = ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]);
@@ -457,7 +468,7 @@ mod tests {
                 key_id: None,
                 pin_file: None,
             }
-            .load()
+            .open()
             .await
             .unwrap_or_else(|err| panic!("{label}: {err}"));
             assert!(!key.algorithms().is_empty(), "{label}: no algorithms");

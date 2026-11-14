@@ -1,7 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+	"ssh-casign-ca",
+	"ssh-casign-ca-azure",
+	"ssh-casign-ca-file",
+	"ssh-casign-ca-pkcs11",
+	"ssh-casign-ca-vault",
 	"ssh-casign-client",
+	"ssh-casign-core",
 	"ssh-casign-proto",
-	"ssh-casign-service"
+	"ssh-casign-service",
 ]

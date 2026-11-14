@@ -17,12 +17,22 @@ writes the certificate to disk or loads it into `ssh-agent`.
 Workspace layout
 ----------------
 
-| Path                  | Contents                                                      |
-|-----------------------|---------------------------------------------------------------|
-| `ssh-casign-service/` | HTTP signing service (axum): token validation, profiles, CAs  |
-| `ssh-casign-client/`  | CLI client (clap): discovery, sign-in selection, sign request |
-| `ssh-casign-proto/`   | Wire types shared by service and client                       |
-| `poc/`                | Mock IdP, test CA key, sample config and a curl test script   |
+| Path                    | Contents                                                                                                                            |
+|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `ssh-casign-service/`   | The service binary: config source, logging, TLS, which backends a build has                                                         |
+| `ssh-casign-core/`      | Service logic: OIDC, certificate policy, key IDs, audit, HTTP API                                                                   |
+| `ssh-casign-ca/`        | Certificates with pluggable key backends: `Backend` trait, signature algorithms, certificate encoding and verification, authorities |
+| `ssh-casign-ca-file/`   | Backend: OpenSSH private key file                                                                                                   |
+| `ssh-casign-ca-pkcs11/` | Backend: PKCS#11 tokens (YubiKey, smart cards, HSMs)                                                                                |
+| `ssh-casign-ca-vault/`  | Backend: OpenBao / HashiCorp Vault transit                                                                                          |
+| `ssh-casign-ca-azure/`  | Backend: Azure Key Vault / Managed HSM, Entra ID credentials                                                                        |
+| `ssh-casign-client/`    | CLI client (clap): discovery, sign-in, `login`, `cert`, `logout`                                                                    |
+| `ssh-casign-proto/`     | Wire types shared by service and client                                                                                             |
+| `deploy/`               | Platform packages (Azure Functions)                                                                                                 |
+| `poc/`                  | Test IdPs, CA keys, configs and scripts (not in git)                                                                                |
+
+Backend crates depend only on `ssh-casign-ca`; the core never depends on a backend. The
+service binary registers the backends its Cargo features (`ca-*`) select.
 
 Flow
 ----

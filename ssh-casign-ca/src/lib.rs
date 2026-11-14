@@ -1,58 +1,48 @@
-//! Signing authorities: a CA key in a backend, the certificate types it
-//! signs, and the signature algorithms it offers.
+//! SSH certificate authorities with pluggable key backends.
 //!
-//! Backends are Cargo features, so a build only contains the ones that make
-//! sense for its platform:
+//! This crate turns [`CertificateOptions`] into a correct, verified OpenSSH
+//! certificate ([`signing::issue`]). The CA key lives in a [`Backend`], which
+//! only has to sign bytes; backends are separate crates
+//! (`ssh-casign-ca-file`, `-pkcs11`, `-vault`, `-azure`, ...) that register a
+//! loader for their `provider` name in a [`Registry`].
 //!
-//! | `provider` | Feature     | Keys                                          |
-//! |------------|-------------|-----------------------------------------------|
-//! | `file`     | `ca-file`   | OpenSSH private key file                      |
-//! | `pkcs11`   | `ca-pkcs11` | PKCS#11 token (YubiKey, OpenSC, SoftHSM, HSM) |
-//! | `vault`    | `ca-vault`  | OpenBao / HashiCorp Vault transit engine      |
-//! | `azure_keyvault` | `ca-azure-keyvault` | Azure Key Vault / Managed HSM |
+//! An authority is configured as a TOML table: the common keys
+//! (`provider`, `cert_types`, `signature_algorithms`) are read here, the
+//! rest is handed to the backend's loader.
 
 use serde::Deserialize;
 use ssh_casign_proto::CertType;
 use ssh_key::{public::KeyData, PublicKey};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     pin::Pin,
     sync::Arc,
 };
 
-use crate::certificate::options::CertificateOptions;
+pub mod encoding;
+pub mod options;
+pub mod signing;
 
-#[cfg(feature = "ca-azure-keyvault")]
-pub(crate) mod azure_keyvault;
-pub(crate) mod encoding;
-#[cfg(feature = "ca-file")]
-pub(crate) mod file;
-#[cfg(feature = "ca-pkcs11")]
-pub(crate) mod pkcs11;
-pub(crate) mod signing;
-#[cfg(feature = "ca-vault")]
-pub(crate) mod vault;
+pub use options::CertificateOptions;
+pub use signing::{SignatureAlgorithm, Signed};
 
-use signing::{SignatureAlgorithm, Signed};
-
-pub(crate) type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A failure inside a backend (unreachable service, wrong PIN, ...).
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
-pub(crate) struct BackendError(pub(crate) String);
+pub struct BackendError(pub String);
 
 impl BackendError {
-    #[allow(dead_code)] // unused in a build without backends
-    pub(crate) fn new(message: impl std::fmt::Display) -> Self {
+    pub fn new(message: impl std::fmt::Display) -> Self {
         Self(message.to_string())
     }
 }
 
 /// A CA key in some backend. Backends only sign bytes; certificates are
 /// encoded and verified in [`signing`].
-pub(crate) trait Backend: Send + Sync {
+pub trait Backend: Send + Sync {
     /// For logs, e.g. `file /etc/ssh-casign/ca`.
     fn describe(&self) -> String;
 
@@ -70,97 +60,99 @@ pub(crate) trait Backend: Send + Sync {
     ) -> BoxFuture<'a, Result<Vec<u8>, BackendError>>;
 }
 
-/// Configuration of a backend this build doesn't include: accepted by the
-/// parser, so the error can say which feature is missing.
-#[derive(Deserialize)]
-#[allow(dead_code)] // unused when every backend is compiled in
-pub(crate) struct Unavailable {}
+/// Loads a backend from its configuration: the authority's TOML table
+/// without the common keys.
+pub type Loader = fn(toml::Table) -> BoxFuture<'static, Result<Box<dyn Backend>, String>>;
 
-#[derive(Deserialize)]
-#[serde(tag = "provider", rename_all = "snake_case")]
-enum BackendConfig {
-    #[cfg(feature = "ca-file")]
-    File(file::Config),
-    #[cfg(not(feature = "ca-file"))]
-    File(Unavailable),
-    #[cfg(feature = "ca-pkcs11")]
-    Pkcs11(pkcs11::Config),
-    #[cfg(not(feature = "ca-pkcs11"))]
-    Pkcs11(Unavailable),
-    #[cfg(feature = "ca-vault")]
-    Vault(vault::Config),
-    #[cfg(not(feature = "ca-vault"))]
-    Vault(Unavailable),
-    #[cfg(feature = "ca-azure-keyvault")]
-    AzureKeyvault(azure_keyvault::Config),
-    #[cfg(not(feature = "ca-azure-keyvault"))]
-    AzureKeyvault(Unavailable),
+/// Deserialize a backend's configuration from the table a [`Loader`] gets.
+pub fn parse_config<T: serde::de::DeserializeOwned>(config: toml::Table) -> Result<T, String> {
+    toml::Value::Table(config)
+        .try_into()
+        .map_err(|err: toml::de::Error| err.message().to_string())
 }
 
-#[allow(dead_code)]
-fn unavailable(provider: &str, feature: &str) -> Box<dyn std::error::Error> {
-    format!("provider '{provider}' is not part of this build (enable the '{feature}' feature)")
-        .into()
+/// The backends a build contains, by `provider` name.
+#[derive(Default)]
+pub struct Registry {
+    loaders: BTreeMap<&'static str, Loader>,
+    /// Providers this build lacks, with the Cargo feature that adds them.
+    unavailable: BTreeMap<&'static str, &'static str>,
 }
 
-impl BackendConfig {
-    async fn load(&self) -> Result<Box<dyn Backend>, Box<dyn std::error::Error>> {
-        match self {
-            #[cfg(feature = "ca-file")]
-            BackendConfig::File(config) => Ok(Box::new(config.load()?)),
-            #[cfg(not(feature = "ca-file"))]
-            BackendConfig::File(_) => Err(unavailable("file", "ca-file")),
-            #[cfg(feature = "ca-pkcs11")]
-            BackendConfig::Pkcs11(config) => Ok(Box::new(config.load().await?)),
-            #[cfg(not(feature = "ca-pkcs11"))]
-            BackendConfig::Pkcs11(_) => Err(unavailable("pkcs11", "ca-pkcs11")),
-            #[cfg(feature = "ca-vault")]
-            BackendConfig::Vault(config) => Ok(Box::new(config.load().await?)),
-            #[cfg(not(feature = "ca-vault"))]
-            BackendConfig::Vault(_) => Err(unavailable("vault", "ca-vault")),
-            #[cfg(feature = "ca-azure-keyvault")]
-            BackendConfig::AzureKeyvault(config) => Ok(Box::new(config.load().await?)),
-            #[cfg(not(feature = "ca-azure-keyvault"))]
-            BackendConfig::AzureKeyvault(_) => {
-                Err(unavailable("azure_keyvault", "ca-azure-keyvault"))
-            }
+impl Registry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register(&mut self, provider: &'static str, loader: Loader) -> &mut Self {
+        self.loaders.insert(provider, loader);
+        self
+    }
+
+    /// Note a provider this build doesn't include, for a helpful error.
+    pub fn unavailable(&mut self, provider: &'static str, feature: &'static str) -> &mut Self {
+        self.unavailable.insert(provider, feature);
+        self
+    }
+
+    pub fn providers(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.loaders.keys().copied()
+    }
+
+    async fn load(&self, provider: &str, config: toml::Table) -> Result<Box<dyn Backend>, String> {
+        if let Some(loader) = self.loaders.get(provider) {
+            return loader(config).await;
         }
+        let available = self.providers().collect::<Vec<_>>().join(", ");
+        Err(match self.unavailable.get(provider) {
+            Some(feature) => format!(
+                "provider '{provider}' is not part of this build (enable the '{feature}' feature)"
+            ),
+            None => format!("unknown provider '{provider}' (this build has: {available})"),
+        })
     }
 }
 
 #[derive(Deserialize)]
 struct AuthorityConfig {
+    provider: String,
     cert_types: HashSet<CertType>,
     /// Signature algorithms to offer, in order of preference. Default: all
     /// the key and backend support except `ssh-rsa` (SHA-1), which must be
     /// listed here explicitly to be used.
     signature_algorithms: Option<Vec<SignatureAlgorithm>>,
+    /// Everything else is the backend's configuration.
     #[serde(flatten)]
-    backend: BackendConfig,
+    backend: toml::Table,
 }
 
+/// The `[authorities]` section: authority name → configuration.
 #[derive(Deserialize)]
 #[serde(transparent)]
-pub(crate) struct Config {
+pub struct Config {
     authorities: HashMap<Arc<str>, AuthorityConfig>,
 }
 
 /// A loaded authority.
-pub(crate) struct Authority {
+pub struct Authority {
     backend: Box<dyn Backend>,
     public_key: PublicKey,
     cert_types: Vec<CertType>,
     signature_algorithms: Vec<SignatureAlgorithm>,
 }
 
-pub(crate) type SshCaProviders = HashMap<Arc<str>, Arc<Authority>>;
+/// Loaded authorities by name.
+pub type Authorities = HashMap<Arc<str>, Arc<Authority>>;
 
 impl Config {
-    pub(crate) async fn load(&self) -> Result<SshCaProviders, Box<dyn std::error::Error>> {
+    pub async fn load(
+        &self,
+        registry: &Registry,
+    ) -> Result<Authorities, Box<dyn std::error::Error>> {
         let mut authorities = HashMap::new();
         for (name, config) in &self.authorities {
             let authority = config
-                .load()
+                .load(registry)
                 .await
                 .map_err(|err| format!("authority {name}: {err}"))?;
             tracing::info!(
@@ -180,8 +172,8 @@ impl Config {
 }
 
 impl AuthorityConfig {
-    async fn load(&self) -> Result<Authority, Box<dyn std::error::Error>> {
-        let backend = self.backend.load().await?;
+    async fn load(&self, registry: &Registry) -> Result<Authority, Box<dyn std::error::Error>> {
+        let backend = registry.load(&self.provider, self.backend.clone()).await?;
         let (possible, default) = SignatureAlgorithm::for_key(backend.public_key())?;
         let capable = backend.algorithms();
         let possible: Vec<_> = possible
@@ -225,21 +217,21 @@ impl AuthorityConfig {
 
 impl Authority {
     /// Public key of the CA, i.e. what servers and clients need to trust.
-    pub(crate) fn public_key(&self) -> &PublicKey {
+    pub fn public_key(&self) -> &PublicKey {
         &self.public_key
     }
 
     /// Certificate types this CA is configured to sign.
-    pub(crate) fn cert_types(&self) -> &[CertType] {
+    pub fn cert_types(&self) -> &[CertType] {
         &self.cert_types
     }
 
     /// Signature algorithms this CA offers, in order of preference.
-    pub(crate) fn signature_algorithms(&self) -> &[SignatureAlgorithm] {
+    pub fn signature_algorithms(&self) -> &[SignatureAlgorithm] {
         &self.signature_algorithms
     }
 
-    pub(crate) async fn issue(
+    pub async fn issue(
         &self,
         options: &CertificateOptions,
         algorithm: SignatureAlgorithm,
@@ -262,7 +254,7 @@ impl Authority {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SignError {
+pub enum SignError {
     #[error("certificate type not supported")]
     UnsupportedCertType,
     #[error("signature algorithm {0} not offered by this authority")]
@@ -286,29 +278,29 @@ pub(crate) enum SignError {
 /// The authority and signature algorithm for a request: the first authority
 /// in the profile's order that offers one of the `accepted` algorithms (any,
 /// if the client didn't say), with its most preferred such algorithm.
-pub(crate) fn select<'a>(
+pub fn select<'a>(
     profile_authorities: &'a [Arc<str>],
-    providers: &SshCaProviders,
+    authorities: &Authorities,
     accepted: Option<&[SignatureAlgorithm]>,
 ) -> Result<(&'a str, Arc<Authority>, SignatureAlgorithm), String> {
     for name in profile_authorities {
-        let Some(provider) = providers.get(name) else {
+        let Some(authority) = authorities.get(name) else {
             continue;
         };
-        let algorithm = provider
+        let algorithm = authority
             .signature_algorithms()
             .iter()
             .copied()
             .find(|algorithm| accepted.is_none_or(|accepted| accepted.contains(algorithm)));
         if let Some(algorithm) = algorithm {
-            return Ok((name, provider.clone(), algorithm));
+            return Ok((name, authority.clone(), algorithm));
         }
     }
     let offered: Vec<String> = profile_authorities
         .iter()
-        .filter_map(|name| providers.get(name))
-        .flat_map(|provider| {
-            provider
+        .filter_map(|name| authorities.get(name))
+        .flat_map(|authority| {
+            authority
                 .signature_algorithms()
                 .iter()
                 .map(|a| a.to_string())
@@ -329,8 +321,47 @@ pub(crate) fn select<'a>(
     ))
 }
 
+/// Test helpers for backend crates.
+pub mod testing {
+    use super::*;
+
+    /// A certificate request for an Ed25519 user key with principal `alice`.
+    pub fn options() -> CertificateOptions {
+        let user = ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]);
+        let mut options =
+            CertificateOptions::new_user(PublicKey::from(KeyData::Ed25519(user.public)));
+        options.add_principal("alice");
+        options.set_validity(3600);
+        options.set_serial(7);
+        options.set_key_id("test");
+        options
+    }
+
+    /// Issue a certificate with every algorithm `backend` offers;
+    /// [`signing::issue`] verifies each signature.
+    pub async fn issue_with_every_algorithm(backend: &dyn Backend) -> Result<(), String> {
+        let algorithms = backend.algorithms();
+        if algorithms.is_empty() {
+            return Err(format!("{}: no algorithms", backend.describe()));
+        }
+        for algorithm in algorithms {
+            let signed = signing::issue(backend, &options(), algorithm)
+                .await
+                .map_err(|err| format!("{}: {algorithm}: {err}", backend.describe()))?;
+            if signed.certificate.valid_principals() != ["alice"] {
+                return Err(format!("{algorithm}: wrong principals"));
+            }
+        }
+        Ok(())
+    }
+
+    /// A fixed 2048-bit RSA key (generated with ssh-keygen; only for tests),
+    /// so tests don't spend seconds generating RSA keys.
+    pub const RSA_CA: &str = include_str!("../testdata/rsa-ca");
+}
+
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
     /// Backend for tests: an Ed25519 key that claims any algorithm list.
@@ -355,7 +386,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn authority(seed: u8, algorithms: &[SignatureAlgorithm]) -> Authority {
+    fn authority(seed: u8, algorithms: &[SignatureAlgorithm]) -> Authority {
         let key = KeyData::Ed25519(ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]).public);
         Authority {
             public_key: PublicKey::from(key.clone()),
@@ -368,7 +399,7 @@ pub(crate) mod tests {
     #[test]
     fn selection_follows_profile_order_and_accepted_algorithms() {
         use SignatureAlgorithm::*;
-        let providers: SshCaProviders = [
+        let authorities: Authorities = [
             ("ed25519", authority(1, &[Ed25519])),
             ("rsa", authority(2, &[RsaSha512, RsaSha256])),
             ("legacy", authority(3, &[SshRsa])),
@@ -381,7 +412,7 @@ pub(crate) mod tests {
             .map(Arc::from)
             .collect();
         let pick = |accepted: Option<&[SignatureAlgorithm]>| {
-            select(&profile, &providers, accepted)
+            select(&profile, &authorities, accepted)
                 .map(|(name, _, algorithm)| (name.to_string(), algorithm))
         };
         assert_eq!(pick(None).unwrap(), ("ed25519".into(), Ed25519));
@@ -403,14 +434,57 @@ pub(crate) mod tests {
         );
     }
 
-    #[cfg(not(feature = "ca-vault"))]
+    fn test_loader(config: toml::Table) -> BoxFuture<'static, Result<Box<dyn Backend>, String>> {
+        Box::pin(async move {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestConfig {
+                seed: u8,
+            }
+            let config: TestConfig = parse_config(config)?;
+            let key = KeyData::Ed25519(
+                ssh_key::private::Ed25519Keypair::from_seed(&[config.seed; 32]).public,
+            );
+            Ok(Box::new(TestBackend(key, vec![SignatureAlgorithm::Ed25519])) as Box<dyn Backend>)
+        })
+    }
+
     #[tokio::test]
-    async fn missing_backend_names_the_feature() {
-        let config: Config = toml::from_str(
-            "[ca]\nprovider = \"vault\"\ncert_types = [\"user\"]\naddress = \"http://x\"\n",
-        )
-        .unwrap();
-        let err = config.load().await.err().unwrap().to_string();
+    async fn registry_loads_and_explains_missing_providers() {
+        let mut registry = Registry::new();
+        registry
+            .register("test", test_loader)
+            .unavailable("vault", "ca-vault");
+        let config: Config =
+            toml::from_str("[ok]\nprovider = \"test\"\ncert_types = [\"user\"]\nseed = 4\n")
+                .unwrap();
+        let authorities = config.load(&registry).await.unwrap();
+        assert_eq!(
+            authorities["ok"].signature_algorithms(),
+            [SignatureAlgorithm::Ed25519]
+        );
+
+        let load_err = |toml: &str| {
+            let registry = &registry;
+            let toml = toml.to_string();
+            async move {
+                let config: Config = toml::from_str(&toml).unwrap();
+                config.load(registry).await.err().unwrap().to_string()
+            }
+        };
+        let err = load_err("[v]\nprovider = \"vault\"\ncert_types = [\"user\"]\n").await;
         assert!(err.contains("enable the 'ca-vault' feature"), "{err}");
+        let err = load_err("[x]\nprovider = \"nope\"\ncert_types = [\"user\"]\n").await;
+        assert!(
+            err.contains("unknown provider 'nope' (this build has: test)"),
+            "{err}"
+        );
+        let err =
+            load_err("[t]\nprovider = \"test\"\ncert_types = [\"user\"]\nseed = 1\nbogus = 2\n")
+                .await;
+        assert!(
+            err.contains("bogus"),
+            "backend config keeps deny_unknown_fields: {err}"
+        );
     }
 }

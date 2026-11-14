@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use oidc_jwt_validator::Validator;
 
-use crate::authority::SshCaProviders;
 use crate::config::Config;
+use ssh_casign_ca::{Authorities as SshCaProviders, Registry};
 
 pub(super) struct AppState {
     pub(super) config: Config,
@@ -16,10 +16,13 @@ pub(super) struct AppState {
 }
 
 impl AppState {
-    pub(super) async fn new(config: Config) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+    pub(super) async fn new(
+        config: Config,
+        registry: &Registry,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let server_id = config.server_id()?;
         tracing::info!("server_id {server_id}");
-        let authorities = config.authorities.load().await?;
+        let authorities = config.authorities.load(registry).await?;
         for (profile, settings) in config.profiles.all() {
             for name in settings.authorities() {
                 if !authorities.contains_key(name) {

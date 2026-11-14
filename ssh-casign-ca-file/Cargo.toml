@@ -1,0 +1,20 @@
+[package]
+name = "ssh-casign-ca-file"
+version = "0.1.0"
+edition = "2021"
+description = "ssh-casign CA backend: OpenSSH private key file"
+
+[dependencies]
+rsa = "0.9.10"
+serde = { version = "1.0.214", features = ["derive"] }
+sha1 = { version = "0.10.7", features = ["oid"] }
+sha2 = { version = "0.10.9", features = ["oid"] }
+signature = "2.2.0"
+ssh-casign-ca = { path = "../ssh-casign-ca" }
+ssh-key = { version = "0.6.7", features = ["p256", "p384", "p521", "ed25519", "rsa"] }
+toml = "0.8.19"
+
+[dev-dependencies]
+base64ct = { version = "1.8.3", features = ["alloc"] }
+rand = "0.8.5"
+tokio = { version = "1.41.1", features = ["macros", "rt"] }

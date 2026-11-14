@@ -4,7 +4,7 @@ const DEFAULT_LISTEN: &str = "0.0.0.0:3000";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Config {
+pub struct Config {
     /// Identifies this service instance in key IDs (`{{server_id}}`), so
     /// certificates can be traced back when several instances run side by
     /// side. Defaults to the hostname.
@@ -13,7 +13,7 @@ pub(crate) struct Config {
     listen: Option<String>,
     pub(crate) oidc_provider: crate::web::oidc::Config,
     pub(crate) profiles: crate::certificate::profiles::Profiles,
-    pub(crate) authorities: crate::authority::Config,
+    pub(crate) authorities: ssh_casign_ca::Config,
     /// Audit log; without it, issued certificates are only in the service log.
     pub(crate) audit: Option<crate::audit::Config>,
 }

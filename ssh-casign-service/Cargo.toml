@@ -2,46 +2,40 @@
 name = "ssh-casign-service"
 version = "0.1.0"
 edition = "2021"
+description = "ssh-casign signing service"
 
 [features]
 default = ["ca-file", "tls-native"]
-# TLS for outgoing HTTPS (IdP, Vault, cloud KMS): the platform's TLS stack,
-# or rustls (with the OS certificate store and built-in Mozilla roots) for
-# static builds, e.g. for serverless platforms.
-tls-native = ["reqwest/native-tls"]
-tls-rustls = ["reqwest/rustls-tls-native-roots", "reqwest/rustls-tls-webpki-roots"]
 # CA key backends; build only those that make sense for the target platform.
-ca-file = []
-ca-pkcs11 = ["dep:cryptoki"]
-ca-vault = ["dep:p256", "dep:p384", "dep:p521"]
-ca-azure-keyvault = []
+ca-file = ["dep:ssh-casign-ca-file"]
+ca-pkcs11 = ["dep:ssh-casign-ca-pkcs11"]
+ca-vault = ["dep:ssh-casign-ca-vault"]
+ca-azure-keyvault = ["dep:ssh-casign-ca-azure"]
+# TLS for outgoing HTTPS (IdP, Vault, cloud KMS), for all crates: the
+# platform's TLS stack, or rustls (with the OS certificate store and built-in
+# Mozilla roots) for static builds, e.g. for serverless platforms.
+tls-native = [
+  "reqwest/native-tls",
+  "ssh-casign-ca-azure?/native-tls",
+  "ssh-casign-ca-vault?/native-tls",
+]
+tls-rustls = [
+  "reqwest/rustls-tls-native-roots",
+  "reqwest/rustls-tls-webpki-roots",
+  "ssh-casign-ca-azure?/rustls",
+  "ssh-casign-ca-vault?/rustls",
+]
 
 [dependencies]
-base64ct = { version = "1.8.3", features = ["alloc"] }
-axum = { version="0.7.7", features = ["macros"] }
-axum-extra = { version = "0.9.4", features = ["typed-header"] }
-ssh-casign-proto = { path = "../ssh-casign-proto" }
-libc = "0.2.191"
-oidc-jwt-validator = "0.2.3"
-rand = "0.8.5"
-rsa = "0.9.10"
-sha1 = { version = "0.10.7", features = ["oid"] }
-sha2 = { version = "0.10.9", features = ["oid"] }
-signature = "2.2.0"
-regex = "1.10.2"
-reqwest = { version = "0.11.13", default-features = false, features = ["json"] }
-serde = { version = "1.0.214", features = ["derive", "rc"] }
-serde_json = "1.0.132"
-ssh-encoding = { version = "0.2.0", features = ["alloc"] }
-ssh-key = { version = "0.6.7", features = ["dsa", "p256", "p384", "p521", "ed25519", "rsa"] }
-thiserror = "2.0.3"
+reqwest = { version = "0.11.13", default-features = false }
+ssh-casign-ca = { path = "../ssh-casign-ca" }
+ssh-casign-core = { path = "../ssh-casign-core" }
 tokio = { version = "1.41.1", features = ["full"] }
 toml = "0.8.19"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
-# Optional: CA key backends
-cryptoki = { version = "0.12.1", optional = true }
-p256 = { version = "0.13.2", optional = true, features = ["pem"] }
-p384 = { version = "0.13.1", optional = true, features = ["pem"] }
-p521 = { version = "0.13.3", optional = true, features = ["pem"] }
+ssh-casign-ca-azure = { path = "../ssh-casign-ca-azure", optional = true, default-features = false }
+ssh-casign-ca-file = { path = "../ssh-casign-ca-file", optional = true }
+ssh-casign-ca-pkcs11 = { path = "../ssh-casign-ca-pkcs11", optional = true }
+ssh-casign-ca-vault = { path = "../ssh-casign-ca-vault", optional = true, default-features = false }

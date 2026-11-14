@@ -6,9 +6,10 @@ itself and only asks the backend to sign it. It then verifies the signature agai
 authority's public key before handing the certificate out, so a misconfigured backend
 (or the wrong key) fails the request instead of producing a bad certificate.
 
-Backends are Cargo features of `ssh-casign-service`, so a build only contains what its
-platform needs. A configuration that names a backend the build lacks fails at startup
-with the feature to enable.
+Each backend is its own crate (`ssh-casign-ca-*`), depending only on the backend API in
+`ssh-casign-ca`. The `ssh-casign-service` binary includes them through Cargo features, so
+a build only contains what its platform needs. A configuration that names a backend the
+build lacks fails at startup with the feature to enable.
 
 | `provider`       | Feature             | Status  | Keys                                                  |
 |------------------|---------------------|---------|-------------------------------------------------------|
@@ -94,7 +95,7 @@ pkcs11-tool --module $M --token-label ca --login --pin 1234 \
 pkcs11-tool --module $M --token-label ca --login --pin 1234 \
   --keypairgen --key-type rsa:2048 --label test-rsa --id 03
 PKCS11_TEST_MODULE=$M PKCS11_TEST_TOKEN=ca SSH_CASIGN_PKCS11_PIN=1234 \
-  cargo test -p ssh-casign-service --features ca-pkcs11 -- --ignored issues_with_a_real_token
+  cargo test -p ssh-casign-ca-pkcs11 -- --ignored
 ```
 
 `vault`
@@ -153,3 +154,27 @@ cert_types = ["user"]
   is valid for longer than macOS accepts, so on macOS use a `tls-rustls` build for that.
 
 Deployment on Azure Functions: [deploy/azure-functions](../deploy/azure-functions/README.md).
+
+Writing a backend
+-----------------
+
+A backend crate depends on `ssh-casign-ca` and provides:
+
+- a type implementing `ssh_casign_ca::Backend`: `public_key()`, the `algorithms()` it
+  can sign with, and `sign(algorithm, data)` returning the signature in SSH encoding
+  (`encoding` has helpers for ECDSA conversion, digests and RSA `DigestInfo`);
+- `pub const PROVIDER: &str`, the name used as `provider` in the configuration;
+- `pub fn load(config: toml::Table) -> BoxFuture<Result<Box<dyn Backend>, String>>`,
+  which gets the authority's table without the common keys (`provider`, `cert_types`,
+  `signature_algorithms`); `ssh_casign_ca::parse_config` deserializes it.
+
+Certificates are encoded and verified by `ssh_casign_ca::signing::issue`, so a backend
+can't produce an invalid certificate. `ssh_casign_ca::testing::issue_with_every_algorithm`
+checks a backend end to end in its own tests.
+
+To include it in the service: add an optional dependency and a `ca-…` feature to
+`ssh-casign-service/Cargo.toml`, and a `registry.register(PROVIDER, load)` line (plus
+`unavailable` for builds without it) in `ssh-casign-service/src/main.rs`. HTTP-based
+backends should take their TLS stack from the service: give them `native-tls` (default)
+and `rustls` features that the service's `tls-native`/`tls-rustls` forward to.
+

@@ -78,16 +78,20 @@ malformed `WWW-Authenticate`, missing-principals 401 instead of 403, client erro
 
 Policy defaults and limits were added on 2026-11-14 (see [policy.md](policy.md)).
 
+The workspace is split into a service binary, `ssh-casign-core` (service logic),
+`ssh-casign-ca` (certificates and the backend API) and one crate per backend; see the
+README.
+
 Certificates are now encoded by the service itself (byte-identical to ssh-key, which a
 test checks); backends only sign bytes, and every certificate is verified before it is
 handed out.
 
 Fixed with the signature algorithm work: RSA CAs didn't work at all. ssh-key 0.6.7
 converts RSA keys for the `rsa` crate with the prime `p` twice instead of `p` and `q`,
-which `rsa` 0.9.10 rejects. All RSA signing now goes through our own signer
-(`authority/signing.rs`). ssh-key also can't represent `ssh-rsa` (SHA-1) signatures, so
-those certificates are encoded by hand, and the client keeps certificates as the bytes it
-received (`ssh-casign-client/src/certificate.rs`).
+which `rsa` 0.9.10 rejects. All RSA signing now uses our own conversion
+(`rsa_private_key` in `ssh-casign-ca/src/encoding.rs`). ssh-key also can't represent
+`ssh-rsa` (SHA-1) signatures, so those certificates are encoded by hand, and the client
+keeps certificates as the bytes it received (`ssh-casign-client/src/certificate.rs`).
 
 Still open, ordered by impact:
 

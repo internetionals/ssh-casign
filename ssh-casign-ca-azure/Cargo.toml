@@ -1,0 +1,21 @@
+[package]
+name = "ssh-casign-ca-azure"
+version = "0.1.0"
+edition = "2021"
+description = "ssh-casign CA backend: Azure Key Vault / Managed HSM, with Entra ID credentials"
+
+[features]
+default = ["native-tls"]
+# TLS for the connection to the service (one is needed; the service binary
+# chooses with its tls-native / tls-rustls features).
+native-tls = ["reqwest/native-tls"]
+rustls = ["reqwest/rustls-tls-native-roots", "reqwest/rustls-tls-webpki-roots"]
+
+[dependencies]
+base64ct = { version = "1.8.3", features = ["alloc"] }
+reqwest = { version = "0.11.13", default-features = false, features = ["json"] }
+serde = { version = "1.0.214", features = ["derive"] }
+serde_json = "1.0.132"
+ssh-casign-ca = { path = "../ssh-casign-ca" }
+ssh-key = { version = "0.6.7", features = ["p256", "p384", "p521", "ed25519", "rsa"] }
+toml = "0.8.19"

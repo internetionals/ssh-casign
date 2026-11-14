@@ -1,4 +1,4 @@
-//! CA key in Azure Key Vault or Azure Managed HSM.
+//! ssh-casign CA backend: CA key in Azure Key Vault or Azure Managed HSM.
 //!
 //! The key never leaves the vault; the service hashes the certificate and
 //! asks Key Vault to sign the hash. Key types: EC (P-256, P-384, P-521) and
@@ -9,20 +9,36 @@
 //! `key_version`), so the advertised public key always matches the
 //! signatures; after rotating the key, restart the service.
 
+#[cfg(not(any(feature = "native-tls", feature = "rustls")))]
+compile_error!("enable a TLS feature: native-tls (default) or rustls");
+
 use std::{path::PathBuf, time::Duration};
 
 use base64ct::{Base64UrlUnpadded, Encoding as _};
 use serde::Deserialize;
 use ssh_key::public::{EcdsaPublicKey, KeyData, RsaPublicKey};
 
-use super::{encoding, signing::SignatureAlgorithm, Backend, BackendError, BoxFuture};
-use crate::azure::{Credential, CredentialConfig};
+use ssh_casign_ca::{encoding, Backend, BackendError, BoxFuture, SignatureAlgorithm};
+
+pub mod credential;
+use credential::{Credential, CredentialConfig};
 
 const API_VERSION: &str = "7.4";
 
+/// The `provider` name of this backend.
+pub const PROVIDER: &str = "azure_keyvault";
+
+/// [`ssh_casign_ca::Loader`] for this backend.
+pub fn load(config: toml::Table) -> BoxFuture<'static, Result<Box<dyn Backend>, String>> {
+    Box::pin(async move {
+        let config: Config = ssh_casign_ca::parse_config(config)?;
+        Ok(Box::new(config.open().await?) as Box<dyn Backend>)
+    })
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Config {
+struct Config {
     /// e.g. `https://my-vault.vault.azure.net` or
     /// `https://my-hsm.managedhsm.azure.net`
     vault_url: String,
@@ -136,7 +152,7 @@ fn resource(vault_url: &str) -> &'static str {
 }
 
 impl Config {
-    pub(super) async fn load(&self) -> Result<KeyVaultKey, String> {
+    async fn open(&self) -> Result<KeyVaultKey, String> {
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
         if let Some(file) = &self.ca_cert_file {
             let pem = std::fs::read(file).map_err(|err| format!("{}: {err}", file.display()))?;

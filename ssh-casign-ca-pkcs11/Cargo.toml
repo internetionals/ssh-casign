@@ -1,0 +1,17 @@
+[package]
+name = "ssh-casign-ca-pkcs11"
+version = "0.1.0"
+edition = "2021"
+description = "ssh-casign CA backend: PKCS#11 tokens (YubiKey, smart cards, HSMs)"
+
+[dependencies]
+cryptoki = "0.12.1"
+serde = { version = "1.0.214", features = ["derive"] }
+ssh-casign-ca = { path = "../ssh-casign-ca" }
+ssh-key = { version = "0.6.7", features = ["p256", "p384", "p521", "ed25519", "rsa"] }
+tokio = { version = "1.41.1", features = ["rt"] }
+toml = "0.8.19"
+tracing = "0.1.40"
+
+[dev-dependencies]
+tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }

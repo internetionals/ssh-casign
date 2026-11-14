@@ -15,14 +15,14 @@ use serde::{Deserialize, Serialize};
 use ssh_encoding::Encode;
 use ssh_key::{certificate::CertType, public::KeyData, Certificate, EcdsaCurve};
 
-use super::{
+use crate::{
     encoding::{put_string, put_u32, put_u64},
+    options::CertificateOptions,
     Backend, SignError,
 };
-use crate::certificate::options::CertificateOptions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) enum SignatureAlgorithm {
+pub enum SignatureAlgorithm {
     #[serde(rename = "ssh-ed25519")]
     Ed25519,
     #[serde(rename = "ecdsa-sha2-nistp256")]
@@ -41,7 +41,7 @@ pub(crate) enum SignatureAlgorithm {
 }
 
 impl SignatureAlgorithm {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             SignatureAlgorithm::Ed25519 => "ssh-ed25519",
             SignatureAlgorithm::EcdsaP256 => "ecdsa-sha2-nistp256",
@@ -53,7 +53,7 @@ impl SignatureAlgorithm {
         }
     }
 
-    pub(crate) fn parse(name: &str) -> Option<Self> {
+    pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
             "ssh-ed25519" => SignatureAlgorithm::Ed25519,
             "ecdsa-sha2-nistp256" => SignatureAlgorithm::EcdsaP256,
@@ -69,7 +69,7 @@ impl SignatureAlgorithm {
     /// Algorithms a CA key can produce, and which of them are used when the
     /// authority doesn't configure `signature_algorithms` (strongest first;
     /// never `ssh-rsa`). Backends may support fewer.
-    pub(crate) fn for_key(key: &KeyData) -> Result<(Vec<Self>, Vec<Self>), String> {
+    pub fn for_key(key: &KeyData) -> Result<(Vec<Self>, Vec<Self>), String> {
         let single = |algorithm| Ok((vec![algorithm], vec![algorithm]));
         match key {
             KeyData::Ed25519(_) => single(SignatureAlgorithm::Ed25519),
@@ -101,12 +101,12 @@ impl std::fmt::Display for SignatureAlgorithm {
 }
 
 /// An issued certificate.
-pub(crate) struct Signed {
+pub struct Signed {
     /// The certificate's fields. For `ssh-rsa` the signature's algorithm name
     /// is relabeled in this view: ssh-key can't represent SHA-1 signatures.
-    pub(crate) certificate: Certificate,
+    pub certificate: Certificate,
     /// The certificate as handed out, in OpenSSH format.
-    pub(crate) openssh: String,
+    pub openssh: String,
 }
 
 /// Algorithm name used for the view of an `ssh-rsa` signed certificate.
@@ -223,7 +223,7 @@ fn verify_ssh_rsa(ca_key: &KeyData, tbs: &[u8], signature: &[u8]) -> Result<(), 
 
 /// Issue a certificate: encode it, let `backend` sign it with `algorithm`,
 /// and verify the result.
-pub(crate) async fn issue(
+pub async fn issue(
     backend: &dyn Backend,
     options: &CertificateOptions,
     algorithm: SignatureAlgorithm,

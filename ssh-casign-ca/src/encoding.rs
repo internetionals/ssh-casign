@@ -1,27 +1,25 @@
 //! SSH wire encoding and signature format helpers shared by the backends.
 //!
-//! Which helpers are used depends on the backends compiled in.
-#![allow(dead_code)]
 
 use sha2::Digest;
 
-use super::signing::SignatureAlgorithm;
+use crate::signing::SignatureAlgorithm;
 
-pub(crate) fn put_u32(buf: &mut Vec<u8>, value: u32) {
+pub fn put_u32(buf: &mut Vec<u8>, value: u32) {
     buf.extend_from_slice(&value.to_be_bytes());
 }
 
-pub(crate) fn put_u64(buf: &mut Vec<u8>, value: u64) {
+pub fn put_u64(buf: &mut Vec<u8>, value: u64) {
     buf.extend_from_slice(&value.to_be_bytes());
 }
 
-pub(crate) fn put_string(buf: &mut Vec<u8>, bytes: &[u8]) {
+pub fn put_string(buf: &mut Vec<u8>, bytes: &[u8]) {
     put_u32(buf, bytes.len() as u32);
     buf.extend_from_slice(bytes);
 }
 
 /// SSH `mpint` of an unsigned big-endian integer.
-pub(crate) fn put_mpint(buf: &mut Vec<u8>, unsigned: &[u8]) {
+pub fn put_mpint(buf: &mut Vec<u8>, unsigned: &[u8]) {
     let trimmed = match unsigned.iter().position(|byte| *byte != 0) {
         Some(start) => &unsigned[start..],
         None => &[],
@@ -36,7 +34,7 @@ pub(crate) fn put_mpint(buf: &mut Vec<u8>, unsigned: &[u8]) {
 }
 
 /// SSH ECDSA signature data from `r` and `s`: mpint(r) mpint(s).
-pub(crate) fn ecdsa_signature(r: &[u8], s: &[u8]) -> Vec<u8> {
+pub fn ecdsa_signature(r: &[u8], s: &[u8]) -> Vec<u8> {
     let mut data = Vec::new();
     put_mpint(&mut data, r);
     put_mpint(&mut data, s);
@@ -44,7 +42,7 @@ pub(crate) fn ecdsa_signature(r: &[u8], s: &[u8]) -> Vec<u8> {
 }
 
 /// SSH ECDSA signature data from a fixed-size `r || s` (PKCS#11, JOSE).
-pub(crate) fn ecdsa_signature_from_raw(raw: &[u8]) -> Result<Vec<u8>, String> {
+pub fn ecdsa_signature_from_raw(raw: &[u8]) -> Result<Vec<u8>, String> {
     if raw.is_empty() || !raw.len().is_multiple_of(2) {
         return Err(format!("ECDSA signature of odd length {}", raw.len()));
     }
@@ -54,7 +52,7 @@ pub(crate) fn ecdsa_signature_from_raw(raw: &[u8]) -> Result<Vec<u8>, String> {
 
 /// SSH ECDSA signature data from a DER `SEQUENCE { INTEGER r, INTEGER s }`
 /// (Vault, cloud KMSs).
-pub(crate) fn ecdsa_signature_from_der(der: &[u8]) -> Result<Vec<u8>, String> {
+pub fn ecdsa_signature_from_der(der: &[u8]) -> Result<Vec<u8>, String> {
     fn take<'a>(input: &mut &'a [u8], tag: u8) -> Result<&'a [u8], String> {
         let invalid = || "invalid DER ECDSA signature".to_string();
         let (&found, rest) = input.split_first().ok_or_else(invalid)?;
@@ -92,8 +90,32 @@ pub(crate) fn ecdsa_signature_from_der(der: &[u8]) -> Result<Vec<u8>, String> {
     Ok(ecdsa_signature(r, s))
 }
 
+/// The `rsa` crate's private key for an ssh-key RSA keypair.
+///
+/// Not `rsa::RsaPrivateKey::try_from(keypair)`: ssh-key 0.6.7 passes the
+/// prime `p` twice instead of `p` and `q` there, which the `rsa` crate (since
+/// it validates keys in `from_components`) rejects. That also breaks
+/// ssh-key's own RSA signing, so backends sign RSA with this key instead.
+pub fn rsa_private_key(
+    keypair: &ssh_key::private::RsaKeypair,
+) -> Result<rsa::RsaPrivateKey, String> {
+    let uint = |mpint: &ssh_key::Mpint| {
+        mpint
+            .as_positive_bytes()
+            .map(rsa::BigUint::from_bytes_be)
+            .ok_or_else(|| "invalid RSA key".to_string())
+    };
+    rsa::RsaPrivateKey::from_components(
+        uint(&keypair.public.n)?,
+        uint(&keypair.public.e)?,
+        uint(&keypair.private.d)?,
+        vec![uint(&keypair.private.p)?, uint(&keypair.private.q)?],
+    )
+    .map_err(|err| format!("invalid RSA key: {err}"))
+}
+
 /// The digest an ECDSA or RSA signature algorithm signs.
-pub(crate) fn digest(algorithm: SignatureAlgorithm, data: &[u8]) -> Vec<u8> {
+pub fn digest(algorithm: SignatureAlgorithm, data: &[u8]) -> Vec<u8> {
     use SignatureAlgorithm::*;
     match algorithm {
         EcdsaP256 | RsaSha256 => sha2::Sha256::digest(data).to_vec(),
@@ -107,10 +129,7 @@ pub(crate) fn digest(algorithm: SignatureAlgorithm, data: &[u8]) -> Vec<u8> {
 
 /// PKCS#1 v1.5 `DigestInfo` for an RSA signature algorithm: what a raw RSA
 /// signing mechanism (PKCS#11 `CKM_RSA_PKCS`) has to sign.
-pub(crate) fn rsa_digest_info(
-    algorithm: SignatureAlgorithm,
-    data: &[u8],
-) -> Result<Vec<u8>, String> {
+pub fn rsa_digest_info(algorithm: SignatureAlgorithm, data: &[u8]) -> Result<Vec<u8>, String> {
     const SHA1: &[u8] = &[
         0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e, 0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14,
     ];
