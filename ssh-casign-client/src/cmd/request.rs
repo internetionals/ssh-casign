@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 
 use color_eyre::eyre::WrapErr;
 use ssh_casign_proto::{CertType, SignKeyRequest};
-use ssh_key::{public::KeyData, Certificate, PublicKey};
+use ssh_key::{public::KeyData, PublicKey};
+
+use crate::certificate::Certificate;
 
 use crate::{auth, discovery, error::Result, sign, token_store::StoredToken};
 
@@ -46,6 +48,12 @@ pub(super) struct RequestArgs {
     /// Request a certificate comment
     #[arg(short = 'C', long)]
     comment: Option<String>,
+
+    /// CA signature algorithm the target servers accept, e.g. ssh-rsa for old
+    /// embedded systems (repeatable or comma-separated) [default: from the
+    /// profile, else any]
+    #[arg(long = "ca-signature-algorithm", value_delimiter = ',')]
+    ca_signature_algorithms: Vec<String>,
 }
 
 /// Parse `300`, `30m`, `1h30m`, ... into seconds (units: s, m, h, d, w).
@@ -112,6 +120,17 @@ impl RequestArgs {
             && self.comment.is_none()
     }
 
+    /// Accepted CA signature algorithms: command line, then profile.
+    pub(super) fn ca_signature_algorithms<'a>(
+        &'a self,
+        target: &'a super::Target,
+    ) -> Option<&'a [String]> {
+        if !self.ca_signature_algorithms.is_empty() {
+            return Some(&self.ca_signature_algorithms);
+        }
+        target.ca_signature_algorithms.as_deref()
+    }
+
     /// The application name: command line/environment, then config, then
     /// the default.
     pub(super) fn app_name(&self, target: &super::Target) -> String {
@@ -135,6 +154,7 @@ impl RequestArgs {
             extensions: requested_map(&self.extensions, self.no_extensions),
             critical_options: requested_map(&self.critical_options, self.no_critical_options),
             app_name: Some(self.app_name(target)),
+            ca_signature_algorithms: self.ca_signature_algorithms(target).map(<[String]>::to_vec),
             comment: self.comment.clone(),
         })
     }

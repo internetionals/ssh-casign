@@ -45,6 +45,31 @@ are those that both allow.
 - `extensions` and `critical_options` are maps of name → value. Extensions normally have
   an empty value. `allowed_*` and `required_extensions` take names.
 
+Client keys
+-----------
+
+The client's own public key is checked against the token's and the profile's limits:
+
+| Key                 | Meaning                                                                 |
+|---------------------|-------------------------------------------------------------------------|
+| `allowed_key_types` | OpenSSH key types, e.g. `ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa` |
+| `min_rsa_bits`      | minimum size of RSA keys                                                |
+| `max_rsa_bits`      | maximum size of RSA keys                                                |
+
+As with the other limits, both sources apply. When neither sets `allowed_key_types`,
+every current type except DSA (`ssh-dss`) is allowed. When neither sets
+`min_rsa_bits`, RSA keys need at least 2048 bits; an explicit lower `min_rsa_bits`
+(for example 1024, for a profile of old switches) overrides that default. The key is
+always the client's own choice, so a violation always rejects the request.
+
+```toml
+[[profiles.map]]
+name = "switches"
+claim = "groups"
+value = "network-admins"
+settings = { ssh_ca = "rsa-legacy", allowed_key_types = ["ssh-rsa"], min_rsa_bits = 2048 }
+```
+
 How violations are handled
 --------------------------
 

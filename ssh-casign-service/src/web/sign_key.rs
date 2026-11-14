@@ -10,7 +10,7 @@ use ssh_casign_proto::{CertType, ErrorResponse, SignKeyRequest, SignedKeyRespons
 
 use crate::{
     audit,
-    authority::{SignError, Signer},
+    authority::{self, signing::SignatureAlgorithm, SignError, Signer},
     certificate::{
         key_id,
         policy::{self, Policies, Policy},
@@ -30,6 +30,27 @@ fn new_serial() -> u64 {
             return serial;
         }
     }
+}
+
+/// The client's accepted CA signature algorithms. Unknown names are ignored
+/// (newer clients may know more), but naming only unknown ones is an error.
+fn parse_signature_algorithms(
+    names: Option<&[String]>,
+) -> Result<Option<Vec<SignatureAlgorithm>>, Failure> {
+    let Some(names) = names else {
+        return Ok(None);
+    };
+    let known: Vec<_> = names
+        .iter()
+        .filter_map(|name| SignatureAlgorithm::parse(name))
+        .collect();
+    if known.is_empty() {
+        return Err(Failure::new(
+            StatusCode::BAD_REQUEST,
+            format!("no known CA signature algorithm in [{}]", names.join(", ")),
+        ));
+    }
+    Ok(Some(known))
 }
 
 /// A request that didn't result in a certificate.
@@ -84,10 +105,15 @@ struct Context {
 
 /// An issued certificate and the details the audit record needs.
 struct Certificate {
+    /// The certificate as handed out (for `ssh-rsa`, only this has the real
+    /// SHA-1 signature).
     openssh: String,
+    /// The certificate's fields.
     certificate: ssh_key::Certificate,
     authority: String,
     fingerprint: String,
+    key_type: String,
+    signature_algorithm: String,
 }
 
 pub(super) async fn sign_key(
@@ -169,6 +195,8 @@ async fn issue(
         CertType::User => ssh_key::certificate::CertType::User,
     };
 
+    let accepted_algorithms =
+        parse_signature_algorithms(payload.ca_signature_algorithms.as_deref())?;
     let oidc_id = key_id::oidc_id(claims, state.config.oidc_provider.id_claim())
         .map_err(|err| Failure::new(StatusCode::FORBIDDEN, err.to_string()))?;
     context.oidc_id = Some(oidc_id.clone());
@@ -202,12 +230,14 @@ async fn issue(
         app_name: payload.app_name,
         comment: payload.comment,
     };
-    let resolved = Policies {
+    let policies = Policies {
         token: &token_policy,
         profile: &profile_policy,
-    }
-    .resolve(&request, cert_type)
-    .map_err(|err| {
+    };
+    policies
+        .check_public_key(&client_public_key)
+        .map_err(|err| Failure::new(StatusCode::FORBIDDEN, err.to_string()))?;
+    let resolved = policies.resolve(&request, cert_type).map_err(|err| {
         let message = err.to_string();
         if matches!(err, policy::Error::Conflict(_) | policy::Error::NoValidity) {
             tracing::warn!("policy conflict for profile {}: {message}", profile.name);
@@ -227,25 +257,29 @@ async fn issue(
     let fingerprint = client_public_key
         .fingerprint(Default::default())
         .to_string();
+    let key_type = client_public_key.algorithm().as_str().to_string();
+    let (authority, provider, algorithm) = authority::select(
+        profile.settings.authorities(),
+        &state.authorities,
+        accepted_algorithms.as_deref(),
+    )
+    .map_err(|err| {
+        Failure::new(
+            StatusCode::FORBIDDEN,
+            format!("profile {}: {err}", profile.name),
+        )
+    })?;
     let options = resolved.into_options(client_public_key, cert_type, serial, key_id);
-    let authority = profile.settings.ssh_ca();
-    let provider = state
-        .authorities
-        .get(authority)
-        .ok_or_else(|| {
-            Failure::internal("Provider unavailable", format!("no authority {authority}"))
-        })?
-        .clone();
 
-    let certificate = provider.sign(&options).await?;
-    let openssh = certificate
-        .to_openssh()
-        .map_err(|err| Failure::internal("Failed to generate openssh certificate", err))?;
+    let signed = provider.sign(&options, algorithm).await?;
+    let (certificate, openssh) = (signed.certificate, signed.openssh);
     Ok(Certificate {
         openssh,
         certificate,
         authority: authority.to_string(),
         fingerprint,
+        key_type,
+        signature_algorithm: algorithm.to_string(),
     })
 }
 
@@ -264,6 +298,7 @@ async fn record_issued(
         principals = %certificate.valid_principals().join(","),
         validity_secs = certificate.valid_before() - certificate.valid_after(),
         fingerprint = issued.fingerprint,
+        signature_algorithm = issued.signature_algorithm,
         "issued certificate"
     );
     let Some(log) = &state.audit else {
@@ -294,6 +329,8 @@ async fn record_issued(
                 .map(|(name, value)| (name.as_str(), value.as_str()))
                 .collect(),
             public_key_fingerprint: issued.fingerprint.clone(),
+            key_type: &issued.key_type,
+            signature_algorithm: &issued.signature_algorithm,
             certificate: &issued.openssh,
         }),
     };

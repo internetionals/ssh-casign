@@ -77,7 +77,8 @@ public keys, for `TrustedUserCAKeys` on servers or `@cert-authority` lines in
 ```
 
 Optional requested values: `validity` (seconds), `principals` (list), `extensions` and
-`critical_options` (maps of name → value), `app_name`, `comment`.
+`critical_options` (maps of name → value), `app_name`, `comment`, and
+`ca_signature_algorithms` (list).
 
 Response on success (`200`):
 
@@ -102,6 +103,47 @@ The token must be a JWT signed by a key in the IdP's JWKS. It must contain `exp`
 and `aud`. `iss` must equal `oidc_provider.issuer`, and `aud` must contain one of
 `oidc_provider.audience` (default: the `client_id`, which is what ID tokens carry).
 `nbf` is checked when present.
+
+### Signature algorithms
+
+A certificate carries one CA signature, so what a server can verify depends on the
+signature algorithm. A profile therefore lists one or more authorities (`ssh_ca`), and
+every authority offers the signature algorithms its key supports:
+
+| CA key  | Algorithms offered by default    | Also possible                     |
+|---------|----------------------------------|-----------------------------------|
+| Ed25519 | `ssh-ed25519`                    |                                   |
+| ECDSA   | `ecdsa-sha2-nistp256` (/384/521) |                                   |
+| RSA     | `rsa-sha2-512`, `rsa-sha2-256`   | `ssh-rsa` (SHA-1), only if listed |
+
+The client may say which algorithms its target servers accept
+(`--ca-signature-algorithm`, or `ca_signature_algorithms` in a client profile). The
+service takes the first authority in the profile's order that offers one of them, using
+that authority's preferred algorithm among the accepted ones. Without a list, the first
+authority and its first algorithm are used. If nothing matches, the request is refused
+with a list of what is available. Discovery lists each authority's algorithms.
+
+`ssh-rsa` (RSA with SHA-1) is for systems that will never support anything else, such
+as older switches. OpenSSH refuses it by default since 8.2. Enable it with
+`signature_algorithms = ["ssh-rsa"]` on an authority. To keep it away from other
+profiles, configure the same key file a second time as a separate authority with only
+`ssh-rsa`, and list that authority only in the profiles that need it.
+
+Such old systems usually also need an RSA *user* key (use `login -k` with an RSA key,
+or `cert`), and modern OpenSSH clients only offer RSA certificates with SHA-1 when told
+to, e.g. in `~/.ssh/config` for those hosts:
+
+```text
+Host switch-*
+    PubkeyAcceptedAlgorithms +ssh-rsa-cert-v01@openssh.com
+    HostKeyAlgorithms +ssh-rsa
+```
+
+Ordering also handles CA rotation: list the new authority first and keep the old one
+until every server trusts the new key.
+
+Servers verify the CA signature against `TrustedUserCAKeys`, so every authority a
+profile can select must be trusted by the servers its users log into.
 
 ### Certificate policy
 
@@ -149,12 +191,12 @@ id_claim = "sub"                              # unique, traceable ID for the key
 name = "ops"                   # used in the key ID; default "roles=ops"
 claim = "roles"
 value = "ops"
-settings = { ssh_ca = "default", validity = 3600, max_validity = 86400 }
+settings = { ssh_ca = "ed25519", validity = 3600, max_validity = 86400 }
 
 # Used when no selector matches. Without it, unmatched users get a 403.
 # Any key from docs/policy.md can be used here (defaults and limits).
 [profiles.default]
-ssh_ca = "default"
+ssh_ca = ["ed25519", "rsa"]    # authorities, in order of preference (or one name)
 # key_id = "{{server_id}}:{{profile}}:{{oidc_id}}:{{app_name}}"   # default
 validity = 300                 # default, unless the client or token says otherwise
 max_validity = 28800
@@ -163,10 +205,16 @@ matching_principals = "[a-z][a-z0-9_-]*"
 required_extensions = ["permit-pty"]
 
 # Named signing authorities, referenced by `ssh_ca` in a profile.
-[authorities.default]
+[authorities.ed25519]
 provider = "file"              # only provider so far: OpenSSH private key on disk
 private_key_file = "ssh-ca"
 cert_types = ["user"]          # "user" and/or "host"
+
+[authorities.rsa]
+provider = "file"
+private_key_file = "ssh-ca-rsa"
+cert_types = ["user"]
+# signature_algorithms = ["rsa-sha2-512", "rsa-sha2-256"]   # default for RSA keys
 
 # Audit log (CEF), see docs/audit.md.
 [audit]
@@ -267,6 +315,7 @@ profile's defaults:
 | `--no-critical-options`        | no critical options (except required ones)      |
 | `-I, --app-name NAME`          | workload name for the key ID (see below)        |
 | `-C, --comment TEXT`           | comment                                         |
+| `--ca-signature-algorithm ALG` | CA signature algorithms the servers accept      |
 
 Global options:
 

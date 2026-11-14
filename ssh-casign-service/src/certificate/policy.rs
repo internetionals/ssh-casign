@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer};
-use ssh_key::{certificate::CertType, PublicKey};
+use ssh_key::{certificate::CertType, public::KeyData, PublicKey};
 
 use super::options::CertificateOptions;
 
@@ -32,6 +32,29 @@ pub(crate) const DEFAULT_USER_EXTENSIONS: &[&str] = &[
     "permit-pty",
     "permit-user-rc",
 ];
+
+/// Client key types allowed when neither the token nor the profile sets
+/// `allowed_key_types`: everything current, not DSA.
+pub(crate) const DEFAULT_ALLOWED_KEY_TYPES: &[&str] = &[
+    "ssh-ed25519",
+    "sk-ssh-ed25519@openssh.com",
+    "ecdsa-sha2-nistp256",
+    "ecdsa-sha2-nistp384",
+    "ecdsa-sha2-nistp521",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+    "ssh-rsa",
+];
+
+/// Minimum RSA client key size when neither source sets `min_rsa_bits`.
+pub(crate) const DEFAULT_MIN_RSA_BITS: u32 = 2048;
+
+/// Size of an RSA public key's modulus in bits.
+fn rsa_bits(key: &ssh_key::public::RsaPublicKey) -> u32 {
+    match key.n.as_positive_bytes() {
+        Some([first, rest @ ..]) => rest.len() as u32 * 8 + (8 - first.leading_zeros()),
+        _ => 0,
+    }
+}
 
 /// Built-in limit on the client's application name.
 pub(crate) const MAX_APP_NAME_LEN: usize = 64;
@@ -97,6 +120,12 @@ pub(crate) struct Policy {
     /// Pattern the client's application name must match. (The key ID itself
     /// is built from the profile's `key_id` template.)
     pub(crate) matching_app_name: Option<Pattern>,
+
+    /// Client key types (OpenSSH names, e.g. `ssh-ed25519`, `ssh-rsa`).
+    pub(crate) allowed_key_types: Option<Vec<String>>,
+    /// Size limits for RSA client keys, in bits.
+    pub(crate) min_rsa_bits: Option<u32>,
+    pub(crate) max_rsa_bits: Option<u32>,
 
     /// Default comment.
     pub(crate) comment: Option<String>,
@@ -187,6 +216,69 @@ impl<'a> Policies<'a> {
     /// Each source with a name for error messages.
     fn sources(&self) -> [(&'static str, &'a Policy); 2] {
         [("token", self.token), ("profile", self.profile)]
+    }
+
+    /// Check the client's public key against `allowed_key_types` and the
+    /// RSA size limits of both sources (or the built-in defaults). The key is
+    /// always the client's choice, so violations are rejections.
+    pub(crate) fn check_public_key(&self, key: &PublicKey) -> Result<(), Error> {
+        let key_type = key.algorithm().as_str().to_string();
+        let configured: Vec<_> = self
+            .sources()
+            .into_iter()
+            .filter_map(|(source, policy)| {
+                policy
+                    .allowed_key_types
+                    .as_ref()
+                    .map(|allowed| (source, allowed))
+            })
+            .collect();
+        if configured.is_empty() && !DEFAULT_ALLOWED_KEY_TYPES.contains(&key_type.as_str()) {
+            return Err(Error::Rejected(format!(
+                "client key type {key_type} is not allowed (set allowed_key_types to allow it)"
+            )));
+        }
+        for (source, allowed) in configured {
+            if !allowed.contains(&key_type) {
+                return Err(Error::Rejected(format!(
+                    "client key type {key_type} is not in allowed_key_types of the {source}"
+                )));
+            }
+        }
+
+        if let KeyData::Rsa(rsa) = key.key_data() {
+            let bits = rsa_bits(rsa);
+            let mut min = (DEFAULT_MIN_RSA_BITS, None);
+            let mut max = (u32::MAX, None);
+            let mut min_configured = false;
+            for (source, policy) in self.sources() {
+                if let Some(value) = policy.min_rsa_bits {
+                    if !min_configured || value > min.0 {
+                        min = (value, Some(source));
+                    }
+                    min_configured = true;
+                }
+                if let Some(value) = policy.max_rsa_bits.filter(|value| *value < max.0) {
+                    max = (value, Some(source));
+                }
+            }
+            if bits < min.0 {
+                let limit = match min.1 {
+                    Some(source) => format!("min_rsa_bits {} of the {source}", min.0),
+                    None => format!("the default minimum of {} bits", min.0),
+                };
+                return Err(Error::Rejected(format!(
+                    "client RSA key has {bits} bits, below {limit}"
+                )));
+            }
+            if let (true, Some(source)) = (bits > max.0, max.1) {
+                return Err(Error::Rejected(format!(
+                    "client RSA key has {bits} bits, above max_rsa_bits {} of the {source}",
+                    max.0
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn resolve(
@@ -922,6 +1014,104 @@ mod tests {
                 .unwrap()
                 .app_name,
             None
+        );
+    }
+
+    // --- client keys
+
+    fn key(algorithm: &str, bits: Option<usize>) -> PublicKey {
+        match bits {
+            None => {
+                let keypair = ssh_key::private::Ed25519Keypair::from_seed(&[3; 32]);
+                assert_eq!(algorithm, "ssh-ed25519");
+                PublicKey::new(KeyData::Ed25519(keypair.public), "")
+            }
+            Some(bits) => {
+                // Only the modulus size matters for the checks.
+                let mut n = vec![0xff_u8; bits / 8];
+                n[bits / 8 - 1] |= 1;
+                PublicKey::new(
+                    KeyData::Rsa(ssh_key::public::RsaPublicKey {
+                        e: ssh_key::Mpint::from_positive_bytes(&[1, 0, 1]).unwrap(),
+                        n: ssh_key::Mpint::from_positive_bytes(&n).unwrap(),
+                    }),
+                    "",
+                )
+            }
+        }
+    }
+
+    fn check(
+        token: serde_json::Value,
+        profile: serde_json::Value,
+        key: &PublicKey,
+    ) -> Result<(), Error> {
+        Policies {
+            token: &policy(token),
+            profile: &policy(profile),
+        }
+        .check_public_key(key)
+    }
+
+    #[test]
+    fn rsa_bits_are_counted() {
+        let KeyData::Rsa(rsa) = key("ssh-rsa", Some(3072)).key_data().clone() else {
+            unreachable!()
+        };
+        assert_eq!(rsa_bits(&rsa), 3072);
+    }
+
+    #[test]
+    fn default_key_limits() {
+        let none = serde_json::json!({});
+        assert!(check(none.clone(), none.clone(), &key("ssh-ed25519", None)).is_ok());
+        assert!(check(none.clone(), none.clone(), &key("ssh-rsa", Some(2048))).is_ok());
+        let err = check(none.clone(), none, &key("ssh-rsa", Some(1024))).unwrap_err();
+        assert!(err.to_string().contains("default minimum of 2048"), "{err}");
+    }
+
+    #[test]
+    fn key_types_are_limited_by_both() {
+        let token = serde_json::json!({ "allowed_key_types": ["ssh-ed25519", "ssh-rsa"] });
+        let profile = serde_json::json!({ "allowed_key_types": ["ssh-rsa"] });
+        let err = check(token.clone(), profile.clone(), &key("ssh-ed25519", None)).unwrap_err();
+        assert!(
+            err.to_string().contains("allowed_key_types of the profile"),
+            "{err}"
+        );
+        assert!(check(token, profile, &key("ssh-rsa", Some(4096))).is_ok());
+    }
+
+    #[test]
+    fn rsa_size_limits() {
+        // An old switch: 1024-bit keys allowed explicitly.
+        let switch = serde_json::json!({ "min_rsa_bits": 1024 });
+        assert!(check(
+            serde_json::json!({}),
+            switch.clone(),
+            &key("ssh-rsa", Some(1024))
+        )
+        .is_ok());
+        // The token can still demand more.
+        let err = check(
+            serde_json::json!({ "min_rsa_bits": 3072 }),
+            switch,
+            &key("ssh-rsa", Some(2048)),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("min_rsa_bits 3072 of the token"),
+            "{err}"
+        );
+        let err = check(
+            serde_json::json!({}),
+            serde_json::json!({ "max_rsa_bits": 4096 }),
+            &key("ssh-rsa", Some(8192)),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("max_rsa_bits 4096 of the profile"),
+            "{err}"
         );
     }
 }

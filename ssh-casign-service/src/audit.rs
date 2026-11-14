@@ -485,6 +485,10 @@ pub(crate) struct Issued<'a> {
     pub(crate) extensions: Vec<(&'a str, &'a str)>,
     pub(crate) critical_options: Vec<(&'a str, &'a str)>,
     pub(crate) public_key_fingerprint: String,
+    /// The client key's type, e.g. `ssh-ed25519`.
+    pub(crate) key_type: &'a str,
+    /// The CA signature algorithm, e.g. `rsa-sha2-512`.
+    pub(crate) signature_algorithm: &'a str,
     /// The certificate itself (OpenSSH format), e.g. for revocation lists.
     pub(crate) certificate: &'a str,
 }
@@ -595,6 +599,11 @@ impl Event<'_> {
                         (issued.valid_before.saturating_mul(1000)).to_string(),
                     ),
                     ("sshCertType", issued.cert_type.to_string()),
+                    ("sshKeyType", issued.key_type.to_string()),
+                    (
+                        "sshCaSignatureAlgorithm",
+                        issued.signature_algorithm.to_string(),
+                    ),
                     ("sshExtensions", join_options(&issued.extensions)),
                     ("sshCriticalOptions", join_options(&issued.critical_options)),
                     ("sshCertificate", issued.certificate.to_string()),
@@ -790,6 +799,8 @@ mod tests {
                 extensions: vec![("permit-pty", "")],
                 critical_options: vec![("source-address", "10.0.0.0/8")],
                 public_key_fingerprint: "SHA256:abc".into(),
+                key_type: "ssh-ed25519",
+                signature_algorithm: "ssh-rsa",
                 certificate: "ssh-ed25519-cert-v01@openssh.com AAAA= comment",
             }),
         };
@@ -820,6 +831,7 @@ mod tests {
         assert_eq!(fields["cs3"], "alice,deploy");
         assert_eq!(fields["start"], "1800000000000");
         assert_eq!(fields["sshCriticalOptions"], "source-address=10.0.0.0/8");
+        assert_eq!(fields["sshCaSignatureAlgorithm"], "ssh-rsa");
         assert_eq!(
             fields["sshCertificate"],
             "ssh-ed25519-cert-v01@openssh.com AAAA= comment"

@@ -36,6 +36,9 @@ pub struct Profile {
     pub app_name: Option<String>,
     /// Refresh token storage for this profile; overrides the top-level one.
     pub token_store: Option<TokenStore>,
+    /// CA signature algorithms the servers of this profile accept, e.g.
+    /// `["ssh-rsa"]` for old embedded systems.
+    pub ca_signature_algorithms: Option<Vec<String>>,
 }
 
 fn default_profile() -> String {

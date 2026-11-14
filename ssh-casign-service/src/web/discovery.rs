@@ -23,6 +23,11 @@ pub(super) fn document(
                 AuthorityInfo {
                     public_key: provider.public_key().to_openssh()?,
                     cert_types: provider.cert_types().to_vec(),
+                    signature_algorithms: provider
+                        .signature_algorithms()
+                        .iter()
+                        .map(|algorithm| algorithm.to_string())
+                        .collect(),
                 },
             ))
         })

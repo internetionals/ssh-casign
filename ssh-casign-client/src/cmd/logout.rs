@@ -47,9 +47,9 @@ fn remove_login_identities(
     let mut removed = 0;
     for identity in identities {
         let ours = comment_app_name(&identity.comment).is_some()
-            && identity
-                .certificate()
-                .is_some_and(|certificate| authorities.contains(certificate.signature_key()));
+            && identity.certificate().is_some_and(|certificate| {
+                authorities.contains(certificate.view().signature_key())
+            });
         if ours {
             agent::remove_identity(&identity.key_blob)?;
             removed += 1;

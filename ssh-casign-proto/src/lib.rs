@@ -45,6 +45,11 @@ pub struct SignKeyRequest {
     pub app_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// CA signature algorithms the target servers accept (e.g. `ssh-rsa` for
+    /// old embedded systems). The service uses the first authority of the
+    /// profile that offers one of them. Default: any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_signature_algorithms: Option<Vec<String>>,
 }
 
 /// Successful response of `POST <sign_endpoint>`.
@@ -88,4 +93,7 @@ pub struct AuthorityInfo {
     pub public_key: String,
     /// Certificate types this authority signs.
     pub cert_types: Vec<CertType>,
+    /// CA signature algorithms it offers, in order of preference.
+    #[serde(default)]
+    pub signature_algorithms: Vec<String>,
 }

@@ -3,6 +3,7 @@ use std::ffi::OsString;
 
 pub(crate) mod agent;
 pub(crate) mod auth;
+pub(crate) mod certificate;
 pub(crate) mod cmd;
 pub(crate) mod config;
 pub(crate) mod discovery;

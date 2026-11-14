@@ -82,7 +82,7 @@ pub(super) fn run(args: &Args, target: &super::Target) -> super::CmdResult {
 
     let certificate = obtain_certificate(target, &sign_key_request)?;
 
-    let cert_data = certificate.to_openssh()? + "\n";
+    let cert_data = certificate.to_openssh() + "\n";
     match output {
         Some(certificate_file) => {
             std::fs::write(&certificate_file, cert_data).wrap_err_with(|| {

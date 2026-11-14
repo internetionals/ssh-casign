@@ -57,6 +57,7 @@ pub(crate) struct Target {
     pub(crate) scopes: Option<Vec<String>>,
     pub(crate) app_name: Option<String>,
     pub(crate) token_store: TokenStore,
+    pub(crate) ca_signature_algorithms: Option<Vec<String>>,
 }
 
 fn resolve_target(args: &Args, config: &Config) -> Result<Target> {
@@ -86,6 +87,8 @@ fn resolve_target(args: &Args, config: &Config) -> Result<Target> {
         app_name: profile
             .and_then(|profile| profile.app_name.clone())
             .or_else(|| config.app_name.clone()),
+        ca_signature_algorithms: profile
+            .and_then(|profile| profile.ca_signature_algorithms.clone()),
         token_store: args
             .token_store
             .or(profile.and_then(|profile| profile.token_store))

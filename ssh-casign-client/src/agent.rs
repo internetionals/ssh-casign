@@ -6,7 +6,9 @@
 //! login never has to be written to disk for `ssh-add`.
 
 use color_eyre::eyre::{bail, WrapErr};
-use ssh_key::{private::Ed25519Keypair, public::KeyData, Certificate};
+use ssh_key::{private::Ed25519Keypair, public::KeyData};
+
+use crate::certificate::Certificate;
 use zeroize::Zeroizing;
 
 use crate::error::Result;
@@ -36,13 +38,13 @@ fn add_identity_message(
     comment: &str,
     lifetime_secs: u32,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    match certificate.public_key() {
+    match certificate.view().public_key() {
         KeyData::Ed25519(public) if *public == keypair.public => {}
         _ => bail!("The certificate is not for this key"),
     }
     let mut body = Zeroizing::new(vec![SSH_AGENTC_ADD_ID_CONSTRAINED]);
     put_string(&mut body, ED25519_CERT_ALGORITHM.as_bytes());
-    put_string(&mut body, &certificate.to_bytes()?);
+    put_string(&mut body, certificate.blob());
     put_string(&mut body, keypair.public.as_ref());
     put_string(&mut body, Zeroizing::new(keypair.to_bytes()).as_ref());
     put_string(&mut body, comment.as_bytes());
@@ -66,7 +68,7 @@ pub(crate) struct Identity {
 impl Identity {
     /// The certificate, if this identity is one.
     pub(crate) fn certificate(&self) -> Option<Certificate> {
-        Certificate::from_bytes(&self.key_blob).ok()
+        Certificate::from_blob(self.key_blob.clone()).ok()
     }
 }
 
@@ -228,7 +230,7 @@ mod tests {
         )
         .unwrap();
         builder.valid_principal("alice").unwrap();
-        builder.sign(&ca).unwrap()
+        Certificate::from_blob(builder.sign(&ca).unwrap().to_bytes().unwrap()).unwrap()
     }
 
     #[test]
@@ -243,7 +245,7 @@ mod tests {
         let (algorithm, rest) = read_string(&body[1..]);
         assert_eq!(algorithm, ED25519_CERT_ALGORITHM.as_bytes());
         let (cert_blob, rest) = read_string(rest);
-        assert_eq!(cert_blob, certificate.to_bytes().unwrap());
+        assert_eq!(cert_blob, certificate.blob());
         let (public, rest) = read_string(rest);
         assert_eq!(public, keypair.public.as_ref());
         let (private, rest) = read_string(rest);
@@ -262,7 +264,7 @@ mod tests {
         let certificate = certificate_for(&keypair);
         let mut reply = vec![SSH_AGENT_IDENTITIES_ANSWER];
         reply.extend_from_slice(&2u32.to_be_bytes());
-        put_string(&mut reply, &certificate.to_bytes().unwrap());
+        put_string(&mut reply, certificate.blob());
         put_string(&mut reply, b"ssh-casign:laptop id");
         put_string(&mut reply, &[1, 2, 3]);
         put_string(&mut reply, b"plain key");

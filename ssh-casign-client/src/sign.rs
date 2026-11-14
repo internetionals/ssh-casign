@@ -1,6 +1,6 @@
+use crate::certificate::Certificate;
 use color_eyre::eyre::{bail, WrapErr};
 use ssh_casign_proto::{ErrorResponse, SignKeyRequest, SignedKeyResponse};
-use ssh_key::Certificate;
 use url::Url;
 
 use crate::error::Result;

@@ -20,6 +20,9 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Certificate policy (defaults + limits) |  ✅   | request → token → profile; both limit; docs/policy.md    |
 | Default user extensions                |  ✅   | ssh-keygen's defaults when no extensions are configured  |
 | CA provider abstraction                |  ✅   | `Provider` enum + `Signer` trait, named authorities      |
+| Several CAs per profile                |  ✅   | ordered; selected by the client's accepted algorithms    |
+| CA signature algorithms                |  ✅   | Ed25519, ECDSA, rsa-sha2-512/256, ssh-rsa (opt-in)       |
+| Client key type and size limits        |  ✅   | `allowed_key_types`, `min_rsa_bits`, `max_rsa_bits`      |
 | File-based CA provider                 |  ✅   | OpenSSH private key, restricts allowed cert types        |
 | Other providers (agent, HSM, KMS)      |  ❌   |                                                          |
 | User certificates                      |  ✅   |                                                          |
@@ -73,6 +76,13 @@ order, unauthenticated client requests, PoC config, silently ignored config keys
 malformed `WWW-Authenticate`, missing-principals 401 instead of 403, client error output.
 
 Policy defaults and limits were added on 2026-11-14 (see [policy.md](policy.md)).
+
+Fixed with the signature algorithm work: RSA CAs didn't work at all. ssh-key 0.6.7
+converts RSA keys for the `rsa` crate with the prime `p` twice instead of `p` and `q`,
+which `rsa` 0.9.10 rejects. All RSA signing now goes through our own signer
+(`authority/signing.rs`). ssh-key also can't represent `ssh-rsa` (SHA-1) signatures, so
+those certificates are encoded by hand, and the client keeps certificates as the bytes it
+received (`ssh-casign-client/src/certificate.rs`).
 
 Still open, ordered by impact:
 

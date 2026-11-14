@@ -20,6 +20,13 @@ impl AppState {
         let server_id = config.server_id()?;
         tracing::info!("server_id {server_id}");
         let authorities = config.authorities.load()?;
+        for (profile, settings) in config.profiles.all() {
+            for name in settings.authorities() {
+                if !authorities.contains_key(name) {
+                    return Err(format!("profile {profile}: unknown authority '{name}'").into());
+                }
+            }
+        }
         let oidc_validator = config.oidc_provider.get_validator().await?;
         let discovery_document = super::discovery::document(&config, &authorities)?;
         let audit = match &config.audit {

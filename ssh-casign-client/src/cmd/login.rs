@@ -23,8 +23,7 @@ use color_eyre::eyre::{bail, WrapErr};
 use rand::RngCore;
 use ssh_casign_proto::CertType;
 use ssh_key::{
-    certificate::CertType as SshCertType, private::Ed25519Keypair, public::KeyData, Certificate,
-    PublicKey,
+    certificate::CertType as SshCertType, private::Ed25519Keypair, public::KeyData, PublicKey,
 };
 use zeroize::Zeroizing;
 
@@ -34,7 +33,7 @@ use super::{
         discover_service, obtain_certificate, parse_duration, service_authorities, RequestArgs,
     },
 };
-use crate::{agent, error::Result};
+use crate::{agent, certificate::Certificate, error::Result};
 
 /// Prefix of the agent comment of identities added by `login`.
 const COMMENT_PREFIX: &str = "ssh-casign:";
@@ -93,6 +92,7 @@ fn try_reuse(args: &Args, target: &super::Target) -> Option<(Certificate, Outcom
             authorities: &authorities,
             now: now()?,
             min_remaining: args.min_remaining,
+            signature_algorithms: args.request.ca_signature_algorithms(target),
         };
         let identities = agent::list_identities()?;
         match &args.key {
@@ -122,20 +122,30 @@ struct Criteria<'a> {
     now: u64,
     /// `None`: [`DEFAULT_MIN_REMAINING`], capped at half the validity.
     min_remaining: Option<u64>,
+    /// CA signature algorithms the certificate must have, if restricted.
+    signature_algorithms: Option<&'a [String]>,
 }
 
 impl Criteria<'_> {
     fn accepts(&self, certificate: &Certificate) -> bool {
         let validity = certificate
+            .view()
             .valid_before()
-            .saturating_sub(certificate.valid_after());
+            .saturating_sub(certificate.view().valid_after());
         let min_remaining = self
             .min_remaining
             .unwrap_or_else(|| DEFAULT_MIN_REMAINING.min(validity / 2));
-        certificate.cert_type() == SshCertType::User
-            && self.authorities.contains(certificate.signature_key())
-            && certificate.valid_after() <= self.now
-            && certificate.valid_before() >= self.now.saturating_add(min_remaining)
+        certificate.view().cert_type() == SshCertType::User
+            && self
+                .authorities
+                .contains(certificate.view().signature_key())
+            && certificate.view().valid_after() <= self.now
+            && certificate.view().valid_before() >= self.now.saturating_add(min_remaining)
+            && self.signature_algorithms.is_none_or(|accepted| {
+                accepted
+                    .iter()
+                    .any(|algorithm| algorithm == certificate.signature_algorithm())
+            })
     }
 }
 
@@ -151,7 +161,7 @@ fn find_in_agent(
         .filter(|identity| comment_app_name(&identity.comment).as_deref() == Some(app_name))
         .filter_map(agent::Identity::certificate)
         .filter(|certificate| criteria.accepts(certificate))
-        .max_by_key(Certificate::valid_before)
+        .max_by_key(|certificate| certificate.view().valid_before())
 }
 
 /// With `--key`: reuse KEY-cert.pub if it is good enough, loading it into the
@@ -168,11 +178,13 @@ fn reuse_key_file(
     };
     let certificate = Certificate::from_openssh(data.trim())?;
     let public_key = read_public_key(Some(&public_key_file))?;
-    if certificate.public_key() != public_key.key_data() || !criteria.accepts(&certificate) {
+    if certificate.view().public_key() != public_key.key_data() || !criteria.accepts(&certificate) {
         return Ok(None);
     }
-    let blob = certificate.to_bytes()?;
-    if identities.iter().any(|identity| identity.key_blob == blob) {
+    if identities
+        .iter()
+        .any(|identity| identity.key_blob == certificate.blob())
+    {
         return Ok(Some((certificate, Outcome::Reused)));
     }
     ssh_add(key, remaining_lifetime(&certificate)?, &certificate_file)?;
@@ -192,7 +204,7 @@ fn login_ephemeral(args: &Args, target: &super::Target) -> Result<Certificate> {
     let lifetime = remaining_lifetime(&certificate)?;
     let app_name = args.request.app_name(target);
     let superseded = superseded_identities(&app_name);
-    let comment = agent_comment(&app_name, certificate.key_id());
+    let comment = agent_comment(&app_name, certificate.view().key_id());
     agent::add_certificate(&keypair, &certificate, &comment, lifetime)?;
     remove_identities(&superseded);
     Ok(certificate)
@@ -207,7 +219,7 @@ fn login_with_key_file(args: &Args, target: &super::Target, key: &Path) -> Resul
     let certificate = obtain_certificate(target, &request)?;
 
     let certificate_file = certificate_file_for(&public_key_file);
-    std::fs::write(&certificate_file, certificate.to_openssh()? + "\n")
+    std::fs::write(&certificate_file, certificate.to_openssh() + "\n")
         .wrap_err_with(|| format!("Failed to write certificate {}", certificate_file.display()))?;
     ssh_add(key, remaining_lifetime(&certificate)?, &certificate_file)?;
     Ok(certificate)
@@ -304,7 +316,7 @@ fn now() -> Result<u64> {
 
 /// Seconds until the certificate expires, as the agent's key lifetime.
 fn remaining_lifetime(certificate: &Certificate) -> Result<u32> {
-    let remaining = certificate.valid_before().saturating_sub(now()?);
+    let remaining = certificate.view().valid_before().saturating_sub(now()?);
     if remaining == 0 {
         bail!("The certificate has already expired");
     }
@@ -329,12 +341,12 @@ fn summary(certificate: &Certificate, outcome: Outcome) -> String {
         Outcome::Reloaded => "Reloaded certificate into ssh-agent",
     };
     let remaining = now()
-        .map(|now| certificate.valid_before().saturating_sub(now))
+        .map(|now| certificate.view().valid_before().saturating_sub(now))
         .unwrap_or_default();
     format!(
         "{headline}\n  key ID:     {}\n  principals: {}\n  expires in: {}\n",
-        certificate.key_id(),
-        certificate.valid_principals().join(", "),
+        certificate.view().key_id(),
+        certificate.view().valid_principals().join(", "),
         format_duration(remaining)
     )
 }
@@ -364,12 +376,12 @@ mod tests {
         .unwrap();
         builder.cert_type(cert_type).unwrap();
         builder.valid_principal("alice").unwrap();
-        builder.sign(ca).unwrap()
+        Certificate::from_blob(builder.sign(ca).unwrap().to_bytes().unwrap()).unwrap()
     }
 
     fn identity(certificate: &Certificate, comment: &str) -> agent::Identity {
         agent::Identity {
-            key_blob: certificate.to_bytes().unwrap(),
+            key_blob: certificate.blob().to_vec(),
             comment: comment.to_string(),
         }
     }
@@ -382,6 +394,7 @@ mod tests {
             authorities: &authorities,
             now: NOW,
             min_remaining: Some(300),
+            signature_algorithms: None,
         };
         let user = |valid| certificate(&service_ca, SshCertType::User, valid);
         assert!(criteria.accepts(&user((NOW - 60, NOW + 3600))));
@@ -413,6 +426,26 @@ mod tests {
     }
 
     #[test]
+    fn signature_algorithm_restriction() {
+        let service_ca = ca(1);
+        let authorities = [service_ca.public_key().key_data().clone()];
+        let certificate = certificate(&service_ca, SshCertType::User, (NOW - 60, NOW + 3600));
+        assert_eq!(certificate.signature_algorithm(), "ssh-ed25519");
+        let accepts = |accepted: &[&str]| {
+            let accepted: Vec<String> = accepted.iter().map(|a| a.to_string()).collect();
+            Criteria {
+                authorities: &authorities,
+                now: NOW,
+                min_remaining: Some(300),
+                signature_algorithms: Some(&accepted),
+            }
+            .accepts(&certificate)
+        };
+        assert!(accepts(&["ssh-rsa", "ssh-ed25519"]));
+        assert!(!accepts(&["ssh-rsa"]));
+    }
+
+    #[test]
     fn default_min_remaining_adapts_to_short_certificates() {
         let service_ca = ca(1);
         let authorities = [service_ca.public_key().key_data().clone()];
@@ -420,6 +453,7 @@ mod tests {
             authorities: &authorities,
             now: NOW,
             min_remaining: None,
+            signature_algorithms: None,
         };
         let user = |valid| certificate(&service_ca, SshCertType::User, valid);
         // 1 hour certificate: needs 5 minutes left.
@@ -438,6 +472,7 @@ mod tests {
             authorities: &authorities,
             now: NOW,
             min_remaining: Some(300),
+            signature_algorithms: None,
         };
         let short = certificate(&service_ca, SshCertType::User, (NOW - 60, NOW + 1000));
         let long = certificate(&service_ca, SshCertType::User, (NOW - 60, NOW + 5000));
@@ -448,7 +483,7 @@ mod tests {
             identity(&long, "someone else's key"),
         ];
         let found = find_in_agent(&identities, "laptop", &criteria).unwrap();
-        assert_eq!(found.valid_before(), NOW + 5000);
+        assert_eq!(found.view().valid_before(), NOW + 5000);
         assert!(find_in_agent(&identities, "terraform", &criteria).is_none());
     }
 

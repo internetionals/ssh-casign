@@ -21,7 +21,8 @@ pub(crate) const DEFAULT_PROFILE: &str = "default";
 #[derive(Deserialize)]
 #[serde(try_from = "RawCertificateSettings")]
 pub(crate) struct CertificateSettings {
-    ssh_ca: Arc<str>,
+    /// Authorities to sign with, in order of preference.
+    ssh_ca: Vec<Arc<str>>,
     key_id: KeyIdTemplate,
     policy: Policy,
     principal_templates: PrincipalTemplates,
@@ -86,7 +87,7 @@ fn expand_principals(templates: &[Template], context: &Context<'_>) -> Vec<Strin
 /// keys are collected and rejected by hand.
 #[derive(Deserialize)]
 struct RawCertificateSettings {
-    ssh_ca: Arc<str>,
+    ssh_ca: OneOrMany,
     #[serde(default)]
     key_id: KeyIdTemplate,
     #[serde(flatten)]
@@ -95,10 +96,25 @@ struct RawCertificateSettings {
     unknown: BTreeMap<String, toml::Value>,
 }
 
+/// `ssh_ca = "name"` or `ssh_ca = ["first", "second"]`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMany {
+    One(Arc<str>),
+    Many(Vec<Arc<str>>),
+}
+
 impl TryFrom<RawCertificateSettings> for CertificateSettings {
     type Error = String;
 
     fn try_from(raw: RawCertificateSettings) -> Result<Self, Self::Error> {
+        let ssh_ca = match raw.ssh_ca {
+            OneOrMany::One(name) => vec![name],
+            OneOrMany::Many(names) if names.is_empty() => {
+                return Err("ssh_ca must name at least one authority".to_string())
+            }
+            OneOrMany::Many(names) => names,
+        };
         if !raw.unknown.is_empty() {
             let keys: Vec<_> = raw.unknown.keys().map(String::as_str).collect();
             return Err(format!("unknown profile setting(s): {}", keys.join(", ")));
@@ -115,7 +131,7 @@ impl TryFrom<RawCertificateSettings> for CertificateSettings {
             )?,
         };
         Ok(Self {
-            ssh_ca: raw.ssh_ca,
+            ssh_ca,
             key_id: raw.key_id,
             policy: raw.policy,
             principal_templates,
@@ -124,7 +140,8 @@ impl TryFrom<RawCertificateSettings> for CertificateSettings {
 }
 
 impl CertificateSettings {
-    pub(crate) fn ssh_ca(&self) -> &str {
+    /// Authorities to sign with, in order of preference.
+    pub(crate) fn authorities(&self) -> &[Arc<str>] {
         &self.ssh_ca
     }
 
@@ -238,6 +255,18 @@ impl ProfileSelector {
 }
 
 impl Profiles {
+    /// Every profile's name and authorities (for checking the config).
+    pub(crate) fn all(&self) -> impl Iterator<Item = (&str, &CertificateSettings)> {
+        self.map
+            .iter()
+            .map(|selector| (selector.name.as_str(), &selector.settings))
+            .chain(
+                self.default
+                    .iter()
+                    .map(|settings| (DEFAULT_PROFILE, settings)),
+            )
+    }
+
     /// First profile whose selector matches the claims, else the default.
     pub(crate) fn lookup(&self, claims: &TokenClaims) -> Option<Profile<'_>> {
         self.map
@@ -287,12 +316,15 @@ mod tests {
         let as_array = claims(serde_json::json!({ "roles": ["dev", "ops"] }));
         let other = claims(serde_json::json!({ "roles": ["dev"] }));
         assert_eq!(
-            profiles.lookup(&as_string).unwrap().settings.ssh_ca(),
+            profiles.lookup(&as_string).unwrap().settings.authorities()[0].as_ref(),
             "ops"
         );
-        assert_eq!(profiles.lookup(&as_array).unwrap().settings.ssh_ca(), "ops");
         assert_eq!(
-            profiles.lookup(&other).unwrap().settings.ssh_ca(),
+            profiles.lookup(&as_array).unwrap().settings.authorities()[0].as_ref(),
+            "ops"
+        );
+        assert_eq!(
+            profiles.lookup(&other).unwrap().settings.authorities()[0].as_ref(),
             "default"
         );
     }
@@ -404,6 +436,43 @@ mod tests {
             ));
             assert!(result.is_err(), "{template}");
         }
+    }
+
+    #[test]
+    fn ssh_ca_one_or_many() {
+        let profiles: Profiles = toml::from_str(
+            r#"
+            [default]
+            ssh_ca = ["ed25519", "rsa"]
+
+            [[map]]
+            claim = "roles"
+            value = "ops"
+            settings = { ssh_ca = "ops" }
+            "#,
+        )
+        .unwrap();
+        let names: Vec<_> = profiles
+            .all()
+            .map(|(name, settings)| {
+                (
+                    name,
+                    settings
+                        .authorities()
+                        .iter()
+                        .map(|a| a.as_ref())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("roles=ops", vec!["ops"]),
+                ("default", vec!["ed25519", "rsa"])
+            ]
+        );
+        assert!(toml::from_str::<Profiles>("[default]\nssh_ca = []\n").is_err());
     }
 
     #[test]
