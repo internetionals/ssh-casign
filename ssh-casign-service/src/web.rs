@@ -6,7 +6,7 @@ pub(crate) mod sign_key;
 pub(crate) mod state;
 
 pub(crate) async fn main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let listen = config.listen.clone();
+    let listen = config.listen();
     let app_state = state::AppState::new(config).await?;
 
     let app = axum::Router::new()

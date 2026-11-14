@@ -106,10 +106,24 @@ and `aud`. `iss` must equal `oidc_provider.issuer`, and `aud` must contain one o
 
 ### CA key backends
 
-CA keys can be in a file, on a PKCS#11 token (YubiKey, smart card, HSM) or in
-OpenBao/Vault's transit engine; AWS KMS, Azure Key Vault and Google Cloud KMS are
-planned. Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`), so builds
-only contain what their platform needs. See [docs/backends.md](docs/backends.md).
+CA keys can be in a file, on a PKCS#11 token (YubiKey, smart card, HSM), in
+OpenBao/Vault's transit engine or in Azure Key Vault; AWS KMS and Google Cloud KMS are
+planned. Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`,
+`ca-azure-keyvault`), so builds only contain what their platform needs. See
+[docs/backends.md](docs/backends.md).
+
+### Serverless
+
+The service runs as an ordinary HTTP server, so serverless platforms only need the
+right port and configuration source:
+
+- Listen address: `SSH_CASIGN_LISTEN`, else `FUNCTIONS_CUSTOMHANDLER_PORT` (Azure
+  Functions, loopback), else `PORT` (on `0.0.0.0`), else `listen` from the config.
+- Configuration: `SSH_CASIGN_CONFIG_TOML` (the whole file's content), else the file.
+- Audit: the `stdout` sink; the service's own log goes to stderr.
+
+Azure Functions: [deploy/azure-functions](deploy/azure-functions/README.md). AWS Lambda
+and Google Cloud Run functions are planned.
 
 ### Signature algorithms
 

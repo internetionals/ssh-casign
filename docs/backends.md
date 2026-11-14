@@ -16,7 +16,7 @@ with the feature to enable.
 | `pkcs11`         | `ca-pkcs11`         | done    | YubiKey (ykcs11), smart cards (OpenSC), SoftHSM, HSMs |
 | `vault`          | `ca-vault`          | done    | OpenBao / HashiCorp Vault transit engine              |
 | `aws_kms`        | `ca-aws-kms`        | planned | AWS KMS                                               |
-| `azure_keyvault` | `ca-azure-keyvault` | planned | Azure Key Vault / Managed HSM                         |
+| `azure_keyvault` | `ca-azure-keyvault` | done    | Azure Key Vault / Managed HSM                         |
 | `gcp_kms`        | `ca-gcp-kms`        | planned | Google Cloud KMS                                      |
 
 ```sh
@@ -25,7 +25,15 @@ cargo build --release -p ssh-casign-service --no-default-features --features ca-
 
 # with OpenBao / Vault, keeping file-based CAs available
 cargo build --release -p ssh-casign-service --features ca-vault
+
+# Azure Functions: static binary, see deploy/azure-functions
+deploy/azure-functions/build.sh
 ```
+
+TLS for outgoing connections (IdP, Vault, Key Vault) is a feature too: `tls-native`
+(default; the platform's TLS stack and certificate store) or `tls-rustls` (rustls with
+the OS certificate store plus built-in Mozilla roots, for static builds). One of them
+is required.
 
 Signature algorithms per backend
 --------------------------------
@@ -33,14 +41,14 @@ Signature algorithms per backend
 An authority offers the algorithms that both its key and its backend support (see
 `signature_algorithms` in the README):
 
-| Backend | Ed25519                                                   | ECDSA P-256/384/521 | `rsa-sha2-512/256`   | `ssh-rsa` (SHA-1)    |
-|---------|-----------------------------------------------------------|---------------------|----------------------|----------------------|
-| file    | yes                                                       | yes                 | yes                  | yes                  |
-| pkcs11  | if the token has `CKM_EDDSA` (YubiKey 5.7+, SoftHSM 2.6+) | yes (`CKM_ECDSA`)   | yes (`CKM_RSA_PKCS`) | yes                  |
-| vault   | yes                                                       | yes                 | yes                  | yes                  |
-| AWS KMS | to check                                                  | yes                 | yes                  | no                   |
-| Azure   | no                                                        | yes                 | yes                  | no                   |
-| GCP KMS | yes                                                       | P-256/384           | yes                  | only raw-PKCS#1 keys |
+| Backend        | Ed25519                                                   | ECDSA P-256/384/521 | `rsa-sha2-512/256`   | `ssh-rsa` (SHA-1)    |
+|----------------|-----------------------------------------------------------|---------------------|----------------------|----------------------|
+| file           | yes                                                       | yes                 | yes                  | yes                  |
+| pkcs11         | if the token has `CKM_EDDSA` (YubiKey 5.7+, SoftHSM 2.6+) | yes (`CKM_ECDSA`)   | yes (`CKM_RSA_PKCS`) | yes                  |
+| vault          | yes                                                       | yes                 | yes                  | yes                  |
+| AWS KMS        | to check                                                  | yes                 | yes                  | no                   |
+| azure_keyvault | no                                                        | yes                 | yes                  | no                   |
+| GCP KMS        | yes                                                       | P-256/384           | yes                  | only raw-PKCS#1 keys |
 
 On platforms without SHA-1 support, profiles that need `ssh-rsa` must use an authority
 on another backend.
@@ -112,3 +120,36 @@ cert_types = ["user"]
   (or a longer path for `hash_algorithm`).
 - Only token authentication so far; AppRole, Kubernetes and cloud IAM logins are not
   implemented yet.
+
+`azure_keyvault`
+----------------
+
+```toml
+[authorities.kv-ec]
+provider = "azure_keyvault"
+vault_url = "https://my-vault.vault.azure.net"   # or https://my-hsm.managedhsm.azure.net
+key = "ssh-ca-ec"                                # EC P-256/384/521 or RSA, also -HSM
+# key_version = "…"                              # default: current version at startup
+# credential = "auto"                            # managed_identity, client_secret, workload_identity
+# client_id = "…"                                # user-assigned identity or app registration
+# tenant_id = "…"; client_secret_file = "…"      # for client_secret
+cert_types = ["user"]
+```
+
+- The service hashes the certificate and Key Vault signs the hash (`ES256/384/512`,
+  `RS256`, `RS512`). Key Vault has no Ed25519 and no SHA-1, so `ssh-rsa` needs another
+  backend.
+- Credentials (`auto` tries them in this order): workload identity
+  (`AZURE_FEDERATED_TOKEN_FILE`, AKS), a client secret (`client_secret_file` or
+  `AZURE_CLIENT_SECRET`), managed identity through `IDENTITY_ENDPOINT` (App Service,
+  Functions), managed identity through the instance metadata service (VMs). Tenant and
+  client ID default to `AZURE_TENANT_ID` and `AZURE_CLIENT_ID`. Tokens are cached until
+  shortly before they expire.
+- The identity needs `get` and `sign` on the key (role "Key Vault Crypto User", or a
+  narrower custom role).
+- The key version is fixed at startup, as for Vault.
+- `ca_cert_file` adds a CA to trust, e.g. for an emulator. Tested with
+  [Lowkey Vault](https://github.com/nagyesta/lowkey-vault). Its self-signed certificate
+  is valid for longer than macOS accepts, so on macOS use a `tls-rustls` build for that.
+
+Deployment on Azure Functions: [deploy/azure-functions](../deploy/azure-functions/README.md).

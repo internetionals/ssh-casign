@@ -9,6 +9,7 @@
 //! | `file`     | `ca-file`   | OpenSSH private key file                      |
 //! | `pkcs11`   | `ca-pkcs11` | PKCS#11 token (YubiKey, OpenSC, SoftHSM, HSM) |
 //! | `vault`    | `ca-vault`  | OpenBao / HashiCorp Vault transit engine      |
+//! | `azure_keyvault` | `ca-azure-keyvault` | Azure Key Vault / Managed HSM |
 
 use serde::Deserialize;
 use ssh_casign_proto::CertType;
@@ -22,6 +23,8 @@ use std::{
 
 use crate::certificate::options::CertificateOptions;
 
+#[cfg(feature = "ca-azure-keyvault")]
+pub(crate) mod azure_keyvault;
 pub(crate) mod encoding;
 #[cfg(feature = "ca-file")]
 pub(crate) mod file;
@@ -88,6 +91,10 @@ enum BackendConfig {
     Vault(vault::Config),
     #[cfg(not(feature = "ca-vault"))]
     Vault(Unavailable),
+    #[cfg(feature = "ca-azure-keyvault")]
+    AzureKeyvault(azure_keyvault::Config),
+    #[cfg(not(feature = "ca-azure-keyvault"))]
+    AzureKeyvault(Unavailable),
 }
 
 #[allow(dead_code)]
@@ -111,6 +118,12 @@ impl BackendConfig {
             BackendConfig::Vault(config) => Ok(Box::new(config.load().await?)),
             #[cfg(not(feature = "ca-vault"))]
             BackendConfig::Vault(_) => Err(unavailable("vault", "ca-vault")),
+            #[cfg(feature = "ca-azure-keyvault")]
+            BackendConfig::AzureKeyvault(config) => Ok(Box::new(config.load().await?)),
+            #[cfg(not(feature = "ca-azure-keyvault"))]
+            BackendConfig::AzureKeyvault(_) => {
+                Err(unavailable("azure_keyvault", "ca-azure-keyvault"))
+            }
         }
     }
 }

@@ -685,7 +685,14 @@ pub(crate) fn client_address(
         .and_then(|name| headers.get_all(name).iter().next_back())
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.rsplit(',').next())
-        .and_then(|entry| entry.trim().parse::<IpAddr>().ok());
+        .and_then(|entry| {
+            // Azure App Service / Functions add "IP:port".
+            let entry = entry.trim();
+            entry
+                .parse::<IpAddr>()
+                .ok()
+                .or_else(|| entry.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+        });
     match forwarded {
         Some(ip) => (ip, None),
         None => (peer.ip(), Some(peer.port())),
@@ -882,6 +889,16 @@ mod tests {
             ("198.51.100.2".parse().unwrap(), None)
         );
         assert_eq!(client_address(peer, None, &headers), (peer.ip(), Some(443)));
+        headers.insert("x-forwarded-for", "203.0.113.9:54321".parse().unwrap());
+        assert_eq!(
+            client_address(peer, Some("x-forwarded-for"), &headers),
+            ("203.0.113.9".parse().unwrap(), None)
+        );
+        headers.insert("x-forwarded-for", "[2001:db8::7]:443".parse().unwrap());
+        assert_eq!(
+            client_address(peer, Some("x-forwarded-for"), &headers),
+            ("2001:db8::7".parse().unwrap(), None)
+        );
         headers.insert("x-forwarded-for", "garbage".parse().unwrap());
         assert_eq!(
             client_address(peer, Some("x-forwarded-for"), &headers),

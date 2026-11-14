@@ -1,8 +1,6 @@
 use serde::Deserialize;
 
-fn default_listen() -> String {
-    "0.0.0.0:3000".to_string()
-}
+const DEFAULT_LISTEN: &str = "0.0.0.0:3000";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -11,9 +9,8 @@ pub(crate) struct Config {
     /// certificates can be traced back when several instances run side by
     /// side. Defaults to the hostname.
     server_id: Option<String>,
-    /// Address to listen on.
-    #[serde(default = "default_listen")]
-    pub(crate) listen: String,
+    /// Address to listen on (see [`Config::listen`] for platform overrides).
+    listen: Option<String>,
     pub(crate) oidc_provider: crate::web::oidc::Config,
     pub(crate) profiles: crate::certificate::profiles::Profiles,
     pub(crate) authorities: crate::authority::Config,
@@ -22,6 +19,30 @@ pub(crate) struct Config {
 }
 
 impl Config {
+    /// Address to listen on: `SSH_CASIGN_LISTEN`; on Azure Functions
+    /// `FUNCTIONS_CUSTOMHANDLER_PORT` (loopback only, the Functions host
+    /// forwards requests); on platforms that set `PORT` (Cloud Run, ...) that
+    /// port; else `listen` from the config, else `0.0.0.0:3000`.
+    pub(crate) fn listen(&self) -> String {
+        let env = |name| {
+            std::env::var(name)
+                .ok()
+                .filter(|value: &String| !value.is_empty())
+        };
+        if let Some(listen) = env("SSH_CASIGN_LISTEN") {
+            return listen;
+        }
+        if let Some(port) = env("FUNCTIONS_CUSTOMHANDLER_PORT") {
+            return format!("127.0.0.1:{port}");
+        }
+        if let Some(port) = env("PORT") {
+            return format!("0.0.0.0:{port}");
+        }
+        self.listen
+            .clone()
+            .unwrap_or_else(|| DEFAULT_LISTEN.to_string())
+    }
+
     /// The configured `server_id`, else the hostname.
     pub(crate) fn server_id(&self) -> Result<String, Box<dyn std::error::Error>> {
         match &self.server_id {

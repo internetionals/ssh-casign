@@ -19,12 +19,13 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Claims → profile selection             |  🟡   | one `claim == value` per selector; first match wins      |
 | Certificate policy (defaults + limits) |  ✅   | request → token → profile; both limit; docs/policy.md    |
 | Default user extensions                |  ✅   | ssh-keygen's defaults when no extensions are configured  |
-| CA key backends                        |  🟡   | file, pkcs11, vault; cloud KMSs planned                  |
+| CA key backends                        |  🟡   | file, pkcs11, vault, Azure Key Vault; AWS/GCP planned    |
 | Several CAs per profile                |  ✅   | ordered; selected by the client's accepted algorithms    |
 | CA signature algorithms                |  ✅   | Ed25519, ECDSA, rsa-sha2-512/256, ssh-rsa (opt-in)       |
 | Client key type and size limits        |  ✅   | `allowed_key_types`, `min_rsa_bits`, `max_rsa_bits`      |
 | File-based CA provider                 |  ✅   | OpenSSH private key, restricts allowed cert types        |
-| AWS KMS, Azure Key Vault, GCP KMS      |  ❌   | planned; see docs/backends.md                            |
+| AWS KMS, GCP KMS                       |  ❌   | planned; see docs/backends.md                            |
+| Azure Functions                        |  ✅   | custom handler package in deploy/azure-functions         |
 | User certificates                      |  ✅   |                                                          |
 | Host certificates                      |  ❌   | refused with 501 until a trust model is designed         |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
@@ -184,10 +185,8 @@ Suggested order of work
 5. ~~`ssh-agent` integration and the `login` command.~~ Done.
 6. ~~Serials, claim templates for principals, durable audit log~~ (done), TLS,
    integration tests.
-7. Host certificates; ~~CA backends file, PKCS#11, Vault~~ (done), then AWS KMS, Azure
-   Key Vault, GCP KMS.
-8. Serverless deployment (AWS Lambda, Azure Functions, Google Cloud Run functions): the
-   audit log already has a `stdout` sink for this. Still needed: listen address from the
-   platform's variable (`PORT`, `FUNCTIONS_CUSTOMHANDLER_PORT`), config from environment
-   or a secret store instead of a file, CA keys from a KMS or secret store instead of a
-   file, and on Lambda the Lambda Web Adapter (or the `lambda_http` crate).
+7. Host certificates; ~~CA backends file, PKCS#11, Vault, Azure Key Vault~~ (done),
+   then AWS KMS and GCP KMS (with item 8).
+8. Serverless deployment per platform, each with its cloud KMS: ~~Azure Functions with
+   Key Vault~~ (done), then AWS Lambda with AWS KMS and Google Cloud Run functions with
+   Cloud KMS.
