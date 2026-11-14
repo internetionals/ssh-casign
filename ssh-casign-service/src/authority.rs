@@ -1,5 +1,6 @@
 use serde::Deserialize;
-use ssh_key::Certificate;
+use ssh_casign_proto::CertType;
+use ssh_key::{Certificate, PublicKey};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::certificate::options::CertificateOptions;
@@ -13,13 +14,29 @@ pub(crate) enum ProviderConfig {
 }
 
 #[derive(Deserialize)]
+#[serde(transparent)]
 pub(crate) struct Config {
-    #[serde(flatten)]
     providers: HashMap<Arc<str>, ProviderConfig>,
 }
 
 pub(crate) enum Provider {
     File(Arc<file::State>),
+}
+
+impl Provider {
+    /// Public key of the CA, i.e. what servers and clients need to trust.
+    pub(crate) fn public_key(&self) -> &PublicKey {
+        match self {
+            Provider::File(file) => file.public_key(),
+        }
+    }
+
+    /// Certificate types this CA is configured to sign.
+    pub(crate) fn cert_types(&self) -> &[CertType] {
+        match self {
+            Provider::File(file) => file.cert_types(),
+        }
+    }
 }
 
 pub(crate) type SshCaProviders = HashMap<Arc<str>, Arc<Provider>>;
@@ -29,7 +46,11 @@ impl Config {
         let mut providers = HashMap::new();
         for (name, provider_config) in &self.providers {
             let provider = match provider_config {
-                ProviderConfig::File(file_config) => Provider::File(file_config.load()?),
+                ProviderConfig::File(file_config) => Provider::File(
+                    file_config
+                        .load()
+                        .map_err(|err| format!("authority {name}: {err}"))?,
+                ),
             };
             providers.insert(name.clone(), Arc::new(provider));
         }

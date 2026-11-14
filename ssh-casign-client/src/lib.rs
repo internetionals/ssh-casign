@@ -4,6 +4,7 @@ use std::ffi::OsString;
 pub(crate) mod auth;
 pub(crate) mod cmd;
 pub(crate) mod config;
+pub(crate) mod discovery;
 pub mod error;
 pub(crate) mod sign;
 

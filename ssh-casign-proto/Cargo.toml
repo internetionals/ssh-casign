@@ -1,0 +1,8 @@
+[package]
+name = "ssh-casign-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Wire types shared by ssh-casign-service and ssh-casign-client"
+
+[dependencies]
+serde = { version = "1.0.214", features = ["derive"] }

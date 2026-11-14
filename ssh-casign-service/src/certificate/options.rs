@@ -10,6 +10,7 @@ pub struct CertificateOptions {
     pub validity: Option<u64>,
     pub principals: Vec<Arc<str>>,
     pub key_id: Option<Arc<str>>,
+    pub serial: Option<u64>,
     pub comment: Option<Arc<str>>,
     pub extensions: HashMap<Arc<str>, Arc<str>>,
     pub critical_options: HashMap<Arc<str>, Arc<str>>,
@@ -24,6 +25,7 @@ impl<'a> CertificateOptions {
             principals: Vec::new(),
             validity: None,
             key_id: None,
+            serial: None,
             comment: None,
             extensions: HashMap::new(),
             critical_options: HashMap::new(),
@@ -72,6 +74,14 @@ impl<'a> CertificateOptions {
 
     pub fn set_key_id<T: Into<Arc<str>>>(&'a mut self, key_id: T) {
         self.key_id = Some(key_id.into());
+    }
+
+    pub fn set_serial(&mut self, serial: u64) {
+        self.serial = Some(serial);
+    }
+
+    pub fn serial(&self) -> Option<u64> {
+        self.serial
     }
 
     pub fn clear_key_id(&mut self) {

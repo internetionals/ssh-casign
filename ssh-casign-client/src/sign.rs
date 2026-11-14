@@ -1,50 +1,44 @@
-use color_eyre::Result;
-use serde::{Deserialize, Serialize};
-use ssh_key::{Certificate, PublicKey};
+use color_eyre::eyre::{bail, WrapErr};
+use ssh_casign_proto::{ErrorResponse, SignKeyRequest, SignedKeyResponse};
+use ssh_key::Certificate;
+use url::Url;
 
-#[derive(clap::ValueEnum, Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CertType {
-    Host,
-    User,
-}
-
-#[derive(Serialize)]
-struct SignKeyRequest {
-    public_key: String,
-    cert_type: CertType,
-}
-
-#[derive(Deserialize)]
-struct SignedKeyResponse {
-    certificate: String,
-}
+use crate::error::Result;
 
 pub(crate) async fn sign(
-    url: String,
-    _profile_name: String,
-    cert_type: CertType,
-    public_key: PublicKey,
+    http: &reqwest::Client,
+    sign_endpoint: &Url,
+    token: &str,
+    sign_key_request: &SignKeyRequest,
 ) -> Result<Certificate> {
-    // Prepare sign request
-    let url = url.clone();
-    let sign_key_request = SignKeyRequest {
-        public_key: public_key.to_openssh()?,
-        cert_type,
-    };
-
-    // Peform sign request
-    let client = reqwest::Client::new();
-    let response: SignedKeyResponse = client
-        .post(url)
-        .json(&sign_key_request)
+    let response = http
+        .post(sign_endpoint.clone())
+        .bearer_auth(token)
+        .json(sign_key_request)
         .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+        .await
+        .wrap_err_with(|| format!("Sign request to {sign_endpoint} failed"))?;
 
-    // Process sign response
-    let cert = Certificate::from_openssh(&response.certificate)?;
+    let status = response.status();
+    if !status.is_success() {
+        let challenge = response
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let detail = match (response.json::<ErrorResponse>().await, challenge) {
+            (Ok(error), _) => error.error,
+            (Err(_), Some(challenge)) => challenge,
+            (Err(_), None) => status
+                .canonical_reason()
+                .unwrap_or("unknown error")
+                .to_string(),
+        };
+        bail!("Sign request rejected ({status}): {detail}");
+    }
+
+    let response: SignedKeyResponse = response.json().await.wrap_err("Invalid sign response")?;
+    let cert = Certificate::from_openssh(&response.certificate)
+        .wrap_err("Service returned an invalid certificate")?;
     Ok(cert)
 }

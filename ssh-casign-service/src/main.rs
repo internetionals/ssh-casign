@@ -1,20 +1,42 @@
-use std::io::Read;
+use std::{path::PathBuf, process::ExitCode};
 
-// mod certificate_settings;
+mod authority;
 mod certificate;
 mod config;
-mod authority;
 mod web;
 
-#[tokio::main]
-async fn main() {
-    // initialize tracing
-    tracing_subscriber::fmt::init();
+/// Config file: first command-line argument, `SSH_CASIGN_CONFIG`, or
+/// `config.toml` in the working directory.
+fn config_file() -> PathBuf {
+    std::env::args_os()
+        .nth(1)
+        .or_else(|| std::env::var_os("SSH_CASIGN_CONFIG"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("config.toml"))
+}
 
-    let mut config = String::new();
-    std::fs::File::open("config.toml")
-        .expect("config file")
-        .read_to_string(&mut config)
-        .expect("config data");
-    web::main(&config).await;
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let config_file = config_file();
+    let config = std::fs::read_to_string(&config_file)
+        .map_err(|err| format!("failed to read {}: {err}", config_file.display()))?;
+    let config: config::Config = toml::from_str(&config)
+        .map_err(|err| format!("failed to parse {}: {err}", config_file.display()))?;
+    web::main(config).await
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            tracing::error!("{err}");
+            ExitCode::FAILURE
+        }
+    }
 }

@@ -2,23 +2,31 @@ use std::sync::Arc;
 
 use oidc_jwt_validator::Validator;
 
-use crate::config::Config;
 use crate::authority::SshCaProviders;
+use crate::config::Config;
 
 pub(super) struct AppState {
     pub(super) config: Config,
+    pub(super) server_id: String,
     pub(super) oidc_validator: Validator,
     pub(super) authorities: SshCaProviders,
+    /// Pre-serialized discovery document (it only depends on the config).
+    pub(super) discovery_document: String,
 }
 
 impl AppState {
-    pub(super) async fn new(config: Config) -> Arc<Self> {
-        let oidc_validator = config.oidc_provider.get_validator().await;
-        let authorities = config.authorities.load().expect("ssh-ca providers");
-        Arc::new(Self {
+    pub(super) async fn new(config: Config) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let server_id = config.server_id()?;
+        tracing::info!("server_id {server_id}");
+        let authorities = config.authorities.load()?;
+        let oidc_validator = config.oidc_provider.get_validator().await?;
+        let discovery_document = super::discovery::document(&config, &authorities)?;
+        Ok(Arc::new(Self {
             config,
+            server_id,
             oidc_validator,
             authorities,
-        })
+            discovery_document,
+        }))
     }
 }
