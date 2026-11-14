@@ -166,7 +166,7 @@ Client
 ------
 
 ```text
-ssh-casign-client [OPTIONS] login [-k KEY] [REQUEST OPTIONS]
+ssh-casign-client [OPTIONS] login [-k KEY] [--new] [--min-remaining DURATION] [REQUEST OPTIONS]
 ssh-casign-client [OPTIONS] cert [-t user|host] [-o FILE] [REQUEST OPTIONS] [PUBLIC_KEY_FILE]
 ```
 
@@ -185,7 +185,27 @@ Added certificate to ssh-agent
   key ID:     ca1:default:alice@example.com:laptop
   principals: alice
   expires in: 1h00m
+
+$ ssh-casign-client login -I laptop        # again: no sign-in needed
+Reusing certificate in ssh-agent
+  ...
 ```
+
+`login` reuses a still-valid certificate instead of signing in again when:
+
+- it was signed by one of the service's authorities (from the discovery document);
+- it has at least `--min-remaining` left (default: 5 minutes, or half the certificate's
+  validity if that is shorter);
+- the request is plain: no `-V`, `-n`, `--extension`, `--critical-option` or `-C`
+  (those always get a new certificate);
+- without `-k`: it was added by `login` for the same application name (`-I`). The agent
+  comment records it: `ssh-casign:<app_name> <key_id>`.
+- with `-k KEY`: `KEY-cert.pub` is used. If the agent no longer holds it, it is loaded
+  again with `ssh-add`, still without signing in.
+
+`--new` always signs in. When `login` adds a new in-memory key, it removes the keys it
+added earlier for the same application name, so the agent doesn't collect keys (servers
+give up after `MaxAuthTries` attempts).
 
 `cert` only requests a certificate for a public key and writes it out.
 

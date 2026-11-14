@@ -1,5 +1,6 @@
-//! Minimal ssh-agent client (draft-miller-ssh-agent): add an Ed25519 key
-//! together with its certificate, constrained to a lifetime.
+//! Minimal ssh-agent client (draft-miller-ssh-agent): list identities, and
+//! add an Ed25519 key together with its certificate, constrained to a
+//! lifetime.
 //!
 //! Only what `login` needs is implemented, so the private key of an ephemeral
 //! login never has to be written to disk for `ssh-add`.
@@ -10,6 +11,9 @@ use zeroize::Zeroizing;
 
 use crate::error::Result;
 
+const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
+const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;
+const SSH_AGENTC_REMOVE_IDENTITY: u8 = 18;
 const SSH_AGENTC_ADD_ID_CONSTRAINED: u8 = 25;
 const SSH_AGENT_CONSTRAIN_LIFETIME: u8 = 1;
 const SSH_AGENT_FAILURE: u8 = 5;
@@ -51,15 +55,25 @@ fn add_identity_message(
     Ok(message)
 }
 
-/// Add the key with its certificate to the agent at `$SSH_AUTH_SOCK`; the
-/// agent forgets both after `lifetime_secs`.
+/// An identity held by the agent: its public key or certificate blob, and
+/// its comment.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Identity {
+    pub(crate) key_blob: Vec<u8>,
+    pub(crate) comment: String,
+}
+
+impl Identity {
+    /// The certificate, if this identity is one.
+    pub(crate) fn certificate(&self) -> Option<Certificate> {
+        Certificate::from_bytes(&self.key_blob).ok()
+    }
+}
+
+/// Send one framed message to the agent at `$SSH_AUTH_SOCK` and return the
+/// reply body.
 #[cfg(unix)]
-pub(crate) fn add_certificate(
-    keypair: &Ed25519Keypair,
-    certificate: &Certificate,
-    comment: &str,
-    lifetime_secs: u32,
-) -> Result<()> {
+fn roundtrip(message: &[u8]) -> Result<Vec<u8>> {
     use std::io::{Read, Write};
 
     let socket = std::env::var_os("SSH_AUTH_SOCK")
@@ -71,10 +85,8 @@ pub(crate) fn add_certificate(
             socket.to_string_lossy()
         )
     })?;
-
-    let message = add_identity_message(keypair, certificate, comment, lifetime_secs)?;
     stream
-        .write_all(&message)
+        .write_all(message)
         .wrap_err("Failed to talk to ssh-agent")?;
 
     let mut len = [0u8; 4];
@@ -89,6 +101,24 @@ pub(crate) fn add_certificate(
     stream
         .read_exact(&mut reply)
         .wrap_err("Truncated reply from ssh-agent")?;
+    Ok(reply)
+}
+
+#[cfg(not(unix))]
+fn roundtrip(_message: &[u8]) -> Result<Vec<u8>> {
+    bail!("ssh-agent is only supported on Unix-like systems")
+}
+
+/// Add the key with its certificate to the agent; the agent forgets both
+/// after `lifetime_secs`.
+pub(crate) fn add_certificate(
+    keypair: &Ed25519Keypair,
+    certificate: &Certificate,
+    comment: &str,
+    lifetime_secs: u32,
+) -> Result<()> {
+    let message = add_identity_message(keypair, certificate, comment, lifetime_secs)?;
+    let reply = roundtrip(&message)?;
     match reply[0] {
         SSH_AGENT_SUCCESS => Ok(()),
         SSH_AGENT_FAILURE => bail!("ssh-agent refused the key and certificate"),
@@ -96,14 +126,59 @@ pub(crate) fn add_certificate(
     }
 }
 
-#[cfg(not(unix))]
-pub(crate) fn add_certificate(
-    _keypair: &Ed25519Keypair,
-    _certificate: &Certificate,
-    _comment: &str,
-    _lifetime_secs: u32,
-) -> Result<()> {
-    bail!("Adding keys to ssh-agent is only supported on Unix-like systems")
+/// Remove one identity (key or certificate) from the agent.
+pub(crate) fn remove_identity(key_blob: &[u8]) -> Result<()> {
+    let mut body = vec![SSH_AGENTC_REMOVE_IDENTITY];
+    put_string(&mut body, key_blob);
+    let mut message = (body.len() as u32).to_be_bytes().to_vec();
+    message.extend_from_slice(&body);
+    match roundtrip(&message)?[0] {
+        SSH_AGENT_SUCCESS => Ok(()),
+        SSH_AGENT_FAILURE => bail!("ssh-agent refused to remove the identity"),
+        other => bail!("Unexpected reply from ssh-agent (message type {other})"),
+    }
+}
+
+/// The identities the agent holds.
+pub(crate) fn list_identities() -> Result<Vec<Identity>> {
+    let reply = roundtrip(&[0, 0, 0, 1, SSH_AGENTC_REQUEST_IDENTITIES])?;
+    parse_identities_answer(&reply)
+}
+
+fn take_u32(buf: &mut &[u8]) -> Result<u32> {
+    if buf.len() < 4 {
+        bail!("Truncated identities answer from ssh-agent");
+    }
+    let (value, rest) = buf.split_at(4);
+    *buf = rest;
+    Ok(u32::from_be_bytes(value.try_into().expect("4 bytes")))
+}
+
+fn take_string<'a>(buf: &mut &'a [u8]) -> Result<&'a [u8]> {
+    let len = take_u32(buf)? as usize;
+    if buf.len() < len {
+        bail!("Truncated identities answer from ssh-agent");
+    }
+    let (value, rest) = buf.split_at(len);
+    *buf = rest;
+    Ok(value)
+}
+
+fn parse_identities_answer(reply: &[u8]) -> Result<Vec<Identity>> {
+    let Some((&message_type, mut rest)) = reply.split_first() else {
+        bail!("Empty reply from ssh-agent");
+    };
+    if message_type != SSH_AGENT_IDENTITIES_ANSWER {
+        bail!("Unexpected reply from ssh-agent (message type {message_type})");
+    }
+    let count = take_u32(&mut rest)?;
+    let mut identities = Vec::new();
+    for _ in 0..count {
+        let key_blob = take_string(&mut rest)?.to_vec();
+        let comment = String::from_utf8_lossy(take_string(&mut rest)?).into_owned();
+        identities.push(Identity { key_blob, comment });
+    }
+    Ok(identities)
 }
 
 #[cfg(test)]
@@ -151,6 +226,26 @@ mod tests {
             rest,
             [&[SSH_AGENT_CONSTRAIN_LIFETIME][..], &300u32.to_be_bytes()].concat()
         );
+    }
+
+    #[test]
+    fn identities_answer_parsing() {
+        let keypair = Ed25519Keypair::from_seed(&[1; 32]);
+        let certificate = certificate_for(&keypair);
+        let mut reply = vec![SSH_AGENT_IDENTITIES_ANSWER];
+        reply.extend_from_slice(&2u32.to_be_bytes());
+        put_string(&mut reply, &certificate.to_bytes().unwrap());
+        put_string(&mut reply, b"ssh-casign:laptop id");
+        put_string(&mut reply, &[1, 2, 3]);
+        put_string(&mut reply, b"plain key");
+        let identities = parse_identities_answer(&reply).unwrap();
+        assert_eq!(identities.len(), 2);
+        assert_eq!(identities[0].comment, "ssh-casign:laptop id");
+        assert_eq!(identities[0].certificate().unwrap(), certificate);
+        assert!(identities[1].certificate().is_none());
+
+        assert!(parse_identities_answer(&reply[..reply.len() - 3]).is_err());
+        assert!(parse_identities_answer(&[SSH_AGENT_FAILURE]).is_err());
     }
 
     #[test]

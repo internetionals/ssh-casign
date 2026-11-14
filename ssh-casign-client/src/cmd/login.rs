@@ -5,20 +5,37 @@
 //! `--key`, an existing key is used: its certificate is written next to it and
 //! `ssh-add` loads both (and asks for the passphrase if needed). Either way
 //! the agent forgets the key when the certificate expires.
+//!
+//! A still-valid certificate is reused instead of signing in again, when it
+//! was issued by one of the service's authorities, has at least
+//! `--min-remaining` left (default: 5 minutes, or half the certificate's
+//! validity if that is shorter), and the request is plain (no explicit validity,
+//! principals, extensions, critical options or comment). Without `--key` it
+//! must also have been loaded for the same application name, which `login`
+//! records in the agent comment. `--new` always gets a new certificate.
+//!
+//! When a new in-memory key is added, earlier ones that `login` added for the
+//! same application name are removed from the agent.
 
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{bail, WrapErr};
 use rand::RngCore;
 use ssh_casign_proto::CertType;
-use ssh_key::{private::Ed25519Keypair, public::KeyData, Certificate, PublicKey};
+use ssh_key::{
+    certificate::CertType as SshCertType, private::Ed25519Keypair, public::KeyData, Certificate,
+    PublicKey,
+};
 use zeroize::Zeroizing;
 
 use super::{
     cert::{certificate_file_for, read_public_key},
-    request::{obtain_certificate, RequestArgs},
+    request::{obtain_certificate, parse_duration, service_authorities, RequestArgs},
 };
 use crate::{agent, error::Result};
+
+/// Prefix of the agent comment of identities added by `login`.
+const COMMENT_PREFIX: &str = "ssh-casign:";
 
 #[derive(clap::Args, Clone, Debug)]
 pub(super) struct Args {
@@ -27,19 +44,140 @@ pub(super) struct Args {
     #[arg(short, long, value_name = "KEY")]
     key: Option<PathBuf>,
 
+    /// Always sign in for a new certificate, even if a usable one is loaded
+    #[arg(long)]
+    new: bool,
+
+    /// Reuse a loaded certificate only if it is valid for at least this long
+    /// [default: 5m, or half the certificate's validity if that is shorter]
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    min_remaining: Option<u64>,
+
     #[command(flatten)]
     request: RequestArgs,
 }
 
+/// What `login` did.
+enum Outcome {
+    Added,
+    Reused,
+    Reloaded,
+}
+
 pub(super) fn run(args: &Args, target: &super::Target) -> super::CmdResult {
-    let (certificate, lifetime) = match &args.key {
+    if let Some((certificate, outcome)) = try_reuse(args, target) {
+        return Ok(Some(summary(&certificate, outcome)));
+    }
+    let certificate = match &args.key {
         None => login_ephemeral(args, target)?,
         Some(key) => login_with_key_file(args, target, key)?,
     };
-    Ok(Some(summary(&certificate, lifetime)))
+    Ok(Some(summary(&certificate, Outcome::Added)))
 }
 
-fn login_ephemeral(args: &Args, target: &super::Target) -> Result<(Certificate, u32)> {
+/// Reuse a certificate if possible. Any problem (no agent, service not
+/// reachable, ...) just means a normal login.
+fn try_reuse(args: &Args, target: &super::Target) -> Option<(Certificate, Outcome)> {
+    if args.new {
+        return None;
+    }
+    if !args.request.is_plain() {
+        tracing::debug!("not reusing a certificate: specific values were requested");
+        return None;
+    }
+    let found = (|| -> Result<Option<(Certificate, Outcome)>> {
+        let authorities = service_authorities(target)?;
+        let criteria = Criteria {
+            authorities: &authorities,
+            now: now()?,
+            min_remaining: args.min_remaining,
+        };
+        let identities = agent::list_identities()?;
+        match &args.key {
+            None => Ok(
+                find_in_agent(&identities, &args.request.app_name(target), &criteria)
+                    .map(|certificate| (certificate, Outcome::Reused)),
+            ),
+            Some(key) => reuse_key_file(key, &identities, &criteria),
+        }
+    })();
+    match found {
+        Ok(found) => found,
+        Err(err) => {
+            tracing::debug!("not reusing a certificate: {err:#}");
+            None
+        }
+    }
+}
+
+/// Default for `--min-remaining`: this, or half the certificate's validity
+/// if that is shorter (so short-lived certificates can be reused too).
+const DEFAULT_MIN_REMAINING: u64 = 300;
+
+/// When a certificate is good enough to reuse.
+struct Criteria<'a> {
+    authorities: &'a [KeyData],
+    now: u64,
+    /// `None`: [`DEFAULT_MIN_REMAINING`], capped at half the validity.
+    min_remaining: Option<u64>,
+}
+
+impl Criteria<'_> {
+    fn accepts(&self, certificate: &Certificate) -> bool {
+        let validity = certificate
+            .valid_before()
+            .saturating_sub(certificate.valid_after());
+        let min_remaining = self
+            .min_remaining
+            .unwrap_or_else(|| DEFAULT_MIN_REMAINING.min(validity / 2));
+        certificate.cert_type() == SshCertType::User
+            && self.authorities.contains(certificate.signature_key())
+            && certificate.valid_after() <= self.now
+            && certificate.valid_before() >= self.now.saturating_add(min_remaining)
+    }
+}
+
+/// The longest-valid certificate in the agent that `login` added for this
+/// application name and that meets the criteria.
+fn find_in_agent(
+    identities: &[agent::Identity],
+    app_name: &str,
+    criteria: &Criteria<'_>,
+) -> Option<Certificate> {
+    identities
+        .iter()
+        .filter(|identity| comment_app_name(&identity.comment).as_deref() == Some(app_name))
+        .filter_map(agent::Identity::certificate)
+        .filter(|certificate| criteria.accepts(certificate))
+        .max_by_key(Certificate::valid_before)
+}
+
+/// With `--key`: reuse KEY-cert.pub if it is good enough, loading it into the
+/// agent again only if it isn't there.
+fn reuse_key_file(
+    key: &Path,
+    identities: &[agent::Identity],
+    criteria: &Criteria<'_>,
+) -> Result<Option<(Certificate, Outcome)>> {
+    let public_key_file = public_key_file_for(key);
+    let certificate_file = certificate_file_for(&public_key_file);
+    let Ok(data) = std::fs::read_to_string(&certificate_file) else {
+        return Ok(None);
+    };
+    let certificate = Certificate::from_openssh(data.trim())?;
+    let public_key = read_public_key(Some(&public_key_file))?;
+    if certificate.public_key() != public_key.key_data() || !criteria.accepts(&certificate) {
+        return Ok(None);
+    }
+    let blob = certificate.to_bytes()?;
+    if identities.iter().any(|identity| identity.key_blob == blob) {
+        return Ok(Some((certificate, Outcome::Reused)));
+    }
+    ssh_add(key, remaining_lifetime(&certificate)?, &certificate_file)?;
+    Ok(Some((certificate, Outcome::Reloaded)))
+}
+
+fn login_ephemeral(args: &Args, target: &super::Target) -> Result<Certificate> {
     let mut seed = Zeroizing::new([0u8; 32]);
     rand::rngs::OsRng.fill_bytes(seed.as_mut());
     let keypair = Ed25519Keypair::from_seed(&seed);
@@ -50,16 +188,16 @@ fn login_ephemeral(args: &Args, target: &super::Target) -> Result<(Certificate, 
         .sign_key_request(&public_key, CertType::User, target)?;
     let certificate = obtain_certificate(target, &request)?;
     let lifetime = remaining_lifetime(&certificate)?;
-    agent::add_certificate(&keypair, &certificate, certificate.key_id(), lifetime)?;
-    Ok((certificate, lifetime))
+    let app_name = args.request.app_name(target);
+    let superseded = superseded_identities(&app_name);
+    let comment = agent_comment(&app_name, certificate.key_id());
+    agent::add_certificate(&keypair, &certificate, &comment, lifetime)?;
+    remove_identities(&superseded);
+    Ok(certificate)
 }
 
-fn login_with_key_file(
-    args: &Args,
-    target: &super::Target,
-    key: &Path,
-) -> Result<(Certificate, u32)> {
-    let public_key_file = PathBuf::from(format!("{}.pub", key.display()));
+fn login_with_key_file(args: &Args, target: &super::Target, key: &Path) -> Result<Certificate> {
+    let public_key_file = public_key_file_for(key);
     let public_key = read_public_key(Some(&public_key_file))?;
     let request = args
         .request
@@ -69,9 +207,41 @@ fn login_with_key_file(
     let certificate_file = certificate_file_for(&public_key_file);
     std::fs::write(&certificate_file, certificate.to_openssh()? + "\n")
         .wrap_err_with(|| format!("Failed to write certificate {}", certificate_file.display()))?;
+    ssh_add(key, remaining_lifetime(&certificate)?, &certificate_file)?;
+    Ok(certificate)
+}
 
-    // ssh-add picks up KEY-cert.pub by itself and handles passphrases.
-    let lifetime = remaining_lifetime(&certificate)?;
+/// Identities that `login` added earlier for this application name. They are
+/// removed once the new certificate is in, so the agent doesn't pile up keys
+/// (servers stop after MaxAuthTries attempts).
+fn superseded_identities(app_name: &str) -> Vec<Vec<u8>> {
+    match agent::list_identities() {
+        Ok(identities) => identities
+            .into_iter()
+            .filter(|identity| comment_app_name(&identity.comment).as_deref() == Some(app_name))
+            .map(|identity| identity.key_blob)
+            .collect(),
+        Err(err) => {
+            tracing::debug!("not listing ssh-agent identities: {err:#}");
+            Vec::new()
+        }
+    }
+}
+
+fn remove_identities(key_blobs: &[Vec<u8>]) {
+    for key_blob in key_blobs {
+        if let Err(err) = agent::remove_identity(key_blob) {
+            tracing::debug!("failed to remove a superseded identity: {err:#}");
+        }
+    }
+}
+
+fn public_key_file_for(key: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.pub", key.display()))
+}
+
+/// Load KEY and KEY-cert.pub with `ssh-add`, which handles passphrases.
+fn ssh_add(key: &Path, lifetime: u32, certificate_file: &Path) -> Result<()> {
     let status = std::process::Command::new("ssh-add")
         .arg("-t")
         .arg(lifetime.to_string())
@@ -80,26 +250,66 @@ fn login_with_key_file(
         .wrap_err("Failed to run ssh-add")?;
     if !status.success() {
         bail!(
-            "ssh-add failed ({status}); the certificate was written to {}",
+            "ssh-add failed ({status}); the certificate is in {}",
             certificate_file.display()
         );
     }
-    Ok((certificate, lifetime))
+    Ok(())
+}
+
+/// Agent comment: `ssh-casign:<app_name> <key_id>`. The application name is
+/// percent-encoded so it can't contain the separator.
+fn agent_comment(app_name: &str, key_id: &str) -> String {
+    let mut comment = String::from(COMMENT_PREFIX);
+    for c in app_name.chars() {
+        if c == '%' || c.is_whitespace() || c.is_control() {
+            let mut buf = [0; 4];
+            for byte in c.encode_utf8(&mut buf).bytes() {
+                comment.push_str(&format!("%{byte:02X}"));
+            }
+        } else {
+            comment.push(c);
+        }
+    }
+    comment.push(' ');
+    comment.push_str(key_id);
+    comment
+}
+
+/// The application name from a comment written by [`agent_comment`].
+fn comment_app_name(comment: &str) -> Option<String> {
+    let encoded = comment.strip_prefix(COMMENT_PREFIX)?.split(' ').next()?;
+    let mut bytes = Vec::new();
+    let mut rest = encoded.as_bytes();
+    while let Some((&byte, tail)) = rest.split_first() {
+        if byte == b'%' && tail.len() >= 2 {
+            let hex = std::str::from_utf8(&tail[..2]).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &tail[2..];
+        } else {
+            bytes.push(byte);
+            rest = tail;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn now() -> Result<u64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs())
 }
 
 /// Seconds until the certificate expires, as the agent's key lifetime.
 fn remaining_lifetime(certificate: &Certificate) -> Result<u32> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs();
-    let remaining = certificate.valid_before().saturating_sub(now);
+    let remaining = certificate.valid_before().saturating_sub(now()?);
     if remaining == 0 {
         bail!("The certificate has already expired");
     }
     Ok(u32::try_from(remaining).unwrap_or(u32::MAX))
 }
 
-fn format_duration(secs: u32) -> String {
+fn format_duration(secs: u64) -> String {
     let (days, hours, minutes, seconds) =
         (secs / 86400, secs / 3600 % 24, secs / 60 % 60, secs % 60);
     match (days, hours, minutes) {
@@ -110,18 +320,149 @@ fn format_duration(secs: u32) -> String {
     }
 }
 
-fn summary(certificate: &Certificate, lifetime: u32) -> String {
+fn summary(certificate: &Certificate, outcome: Outcome) -> String {
+    let headline = match outcome {
+        Outcome::Added => "Added certificate to ssh-agent",
+        Outcome::Reused => "Reusing certificate in ssh-agent",
+        Outcome::Reloaded => "Reloaded certificate into ssh-agent",
+    };
+    let remaining = now()
+        .map(|now| certificate.valid_before().saturating_sub(now))
+        .unwrap_or_default();
     format!(
-        "Added certificate to ssh-agent\n  key ID:     {}\n  principals: {}\n  expires in: {}\n",
+        "{headline}\n  key ID:     {}\n  principals: {}\n  expires in: {}\n",
         certificate.key_id(),
         certificate.valid_principals().join(", "),
-        format_duration(lifetime)
+        format_duration(remaining)
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOW: u64 = 1_800_000_000;
+
+    fn ca(seed: u8) -> ssh_key::PrivateKey {
+        ssh_key::PrivateKey::from(Ed25519Keypair::from_seed(&[seed; 32]))
+    }
+
+    fn certificate(
+        ca: &ssh_key::PrivateKey,
+        cert_type: SshCertType,
+        valid: (u64, u64),
+    ) -> Certificate {
+        let key = Ed25519Keypair::from_seed(&[9; 32]);
+        let mut builder = ssh_key::certificate::Builder::new(
+            vec![0; 16],
+            KeyData::Ed25519(key.public),
+            valid.0,
+            valid.1,
+        )
+        .unwrap();
+        builder.cert_type(cert_type).unwrap();
+        builder.valid_principal("alice").unwrap();
+        builder.sign(ca).unwrap()
+    }
+
+    fn identity(certificate: &Certificate, comment: &str) -> agent::Identity {
+        agent::Identity {
+            key_blob: certificate.to_bytes().unwrap(),
+            comment: comment.to_string(),
+        }
+    }
+
+    #[test]
+    fn criteria() {
+        let service_ca = ca(1);
+        let authorities = [service_ca.public_key().key_data().clone()];
+        let criteria = Criteria {
+            authorities: &authorities,
+            now: NOW,
+            min_remaining: Some(300),
+        };
+        let user = |valid| certificate(&service_ca, SshCertType::User, valid);
+        assert!(criteria.accepts(&user((NOW - 60, NOW + 3600))));
+        assert!(criteria.accepts(&user((NOW - 60, NOW + 300))));
+        assert!(
+            !criteria.accepts(&user((NOW - 60, NOW + 299))),
+            "too little left"
+        );
+        assert!(
+            !criteria.accepts(&user((NOW + 60, NOW + 3600))),
+            "not yet valid"
+        );
+        assert!(
+            !criteria.accepts(&certificate(
+                &ca(2),
+                SshCertType::User,
+                (NOW - 60, NOW + 3600)
+            )),
+            "other CA"
+        );
+        assert!(
+            !criteria.accepts(&certificate(
+                &service_ca,
+                SshCertType::Host,
+                (NOW - 60, NOW + 3600)
+            )),
+            "host certificate"
+        );
+    }
+
+    #[test]
+    fn default_min_remaining_adapts_to_short_certificates() {
+        let service_ca = ca(1);
+        let authorities = [service_ca.public_key().key_data().clone()];
+        let criteria = Criteria {
+            authorities: &authorities,
+            now: NOW,
+            min_remaining: None,
+        };
+        let user = |valid| certificate(&service_ca, SshCertType::User, valid);
+        // 1 hour certificate: needs 5 minutes left.
+        assert!(criteria.accepts(&user((NOW - 3000, NOW + 600))));
+        assert!(!criteria.accepts(&user((NOW - 3400, NOW + 200))));
+        // 5 minute certificate: needs half of that, 150 seconds.
+        assert!(criteria.accepts(&user((NOW - 100, NOW + 200))));
+        assert!(!criteria.accepts(&user((NOW - 200, NOW + 100))));
+    }
+
+    #[test]
+    fn find_in_agent_matches_app_name_and_prefers_longest() {
+        let service_ca = ca(1);
+        let authorities = [service_ca.public_key().key_data().clone()];
+        let criteria = Criteria {
+            authorities: &authorities,
+            now: NOW,
+            min_remaining: Some(300),
+        };
+        let short = certificate(&service_ca, SshCertType::User, (NOW - 60, NOW + 1000));
+        let long = certificate(&service_ca, SshCertType::User, (NOW - 60, NOW + 5000));
+        let identities = [
+            identity(&short, &agent_comment("laptop", "a")),
+            identity(&long, &agent_comment("laptop", "b")),
+            identity(&long, &agent_comment("ansible", "c")),
+            identity(&long, "someone else's key"),
+        ];
+        let found = find_in_agent(&identities, "laptop", &criteria).unwrap();
+        assert_eq!(found.valid_before(), NOW + 5000);
+        assert!(find_in_agent(&identities, "terraform", &criteria).is_none());
+    }
+
+    #[test]
+    fn agent_comment_roundtrip() {
+        for app_name in ["laptop", "vs code", "50%", "ünïcode"] {
+            let comment = agent_comment(app_name, "ca1:default:alice:x y");
+            assert_eq!(
+                comment_app_name(&comment).as_deref(),
+                Some(app_name),
+                "{comment}"
+            );
+        }
+        assert_eq!(agent_comment("vs code", "id"), "ssh-casign:vs%20code id");
+        assert_eq!(comment_app_name("my laptop key"), None);
+    }
 
     #[test]
     fn durations() {

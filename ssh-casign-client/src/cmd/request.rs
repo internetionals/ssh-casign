@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use color_eyre::eyre::WrapErr;
 use ssh_casign_proto::{CertType, SignKeyRequest};
-use ssh_key::Certificate;
+use ssh_key::{public::KeyData, Certificate, PublicKey};
 
 use crate::{auth, discovery, error::Result};
 
@@ -49,7 +49,7 @@ pub(super) struct RequestArgs {
 }
 
 /// Parse `300`, `30m`, `1h30m`, ... into seconds (units: s, m, h, d, w).
-fn parse_duration(input: &str) -> std::result::Result<u64, String> {
+pub(super) fn parse_duration(input: &str) -> std::result::Result<u64, String> {
     let invalid = || format!("invalid duration '{input}' (examples: 300, 30m, 8h, 1d, 1h30m)");
     let mut total: u64 = 0;
     let mut digits = String::new();
@@ -100,6 +100,27 @@ fn requested_map(
 }
 
 impl RequestArgs {
+    /// True when nothing specific is requested (the application name aside),
+    /// so any valid certificate from the service will do.
+    pub(super) fn is_plain(&self) -> bool {
+        self.validity.is_none()
+            && self.principals.is_empty()
+            && self.extensions.is_empty()
+            && !self.no_extensions
+            && self.critical_options.is_empty()
+            && !self.no_critical_options
+            && self.comment.is_none()
+    }
+
+    /// The application name: command line/environment, then config, then
+    /// the default.
+    pub(super) fn app_name(&self, target: &super::Target) -> String {
+        self.app_name
+            .clone()
+            .or_else(|| target.app_name.clone())
+            .unwrap_or_else(|| DEFAULT_APP_NAME.to_string())
+    }
+
     pub(super) fn sign_key_request(
         &self,
         public_key: &ssh_key::PublicKey,
@@ -113,15 +134,34 @@ impl RequestArgs {
             principals: (!self.principals.is_empty()).then(|| self.principals.clone()),
             extensions: requested_map(&self.extensions, self.no_extensions),
             critical_options: requested_map(&self.critical_options, self.no_critical_options),
-            app_name: Some(
-                self.app_name
-                    .clone()
-                    .or_else(|| target.app_name.clone())
-                    .unwrap_or_else(|| DEFAULT_APP_NAME.to_string()),
-            ),
+            app_name: Some(self.app_name(target)),
             comment: self.comment.clone(),
         })
     }
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .wrap_err("Failed to create tokio runtime")
+}
+
+/// Public keys of the service's signing authorities, from its discovery
+/// document (no sign-in needed).
+pub(super) fn service_authorities(target: &super::Target) -> Result<Vec<KeyData>> {
+    let service = runtime()?.block_on(discovery::discover(&reqwest::Client::new(), &target.url))?;
+    service
+        .info
+        .authorities
+        .values()
+        .map(|authority| {
+            Ok(PublicKey::from_openssh(&authority.public_key)
+                .wrap_err("Invalid CA public key in service discovery document")?
+                .key_data()
+                .clone())
+        })
+        .collect()
 }
 
 /// Discover the service, sign in and request the certificate.
@@ -129,11 +169,7 @@ pub(super) fn obtain_certificate(
     target: &super::Target,
     sign_key_request: &SignKeyRequest,
 ) -> Result<Certificate> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .wrap_err("Failed to create tokio runtime")?;
-    rt.block_on(async {
+    runtime()?.block_on(async {
         let http = reqwest::Client::new();
         let service = discovery::discover(&http, &target.url).await?;
         let scopes = target.scopes.as_ref().unwrap_or(&service.info.scopes);

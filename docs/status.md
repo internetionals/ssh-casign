@@ -49,6 +49,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Sign request with bearer token         |  ✅   | error details from body or `WWW-Authenticate`            |
 | Request certificate values             |  ✅   | validity, principals, extensions, app name, ...          |
 | Add key + certificate to `ssh-agent`   |  ✅   | `login`: in-memory key, or existing key via `ssh-add`    |
+| Reuse still-valid certificates         |  ✅   | same CA, app name, enough validity left; `--new`         |
 | Generate a key pair                    |  ✅   | ephemeral Ed25519 for `login`, never written to disk     |
 | Tests                                  |  🟡   | option precedence, certificate file naming               |
 
@@ -124,10 +125,13 @@ values, for example a `comment` template, or `matching_*` patterns built from cl
 
 ### Client UX
 
-- `login` is done: in-memory key or existing key, lifetime equal to the certificate.
-- Next: reuse a still-valid certificate instead of signing in again (check the agent
-  for a certificate from the same service with enough validity left), and cache the
-  refresh token so renewal needs no browser or device code.
+- `login` is done: in-memory key or existing key, lifetime equal to the certificate, and
+  reuse of a still-valid certificate from the same service and application name.
+- Next: cache the refresh token, so getting a new certificate needs no browser or device
+  code while the IdP session lasts.
+- Reuse doesn't look at *who* the certificate is for: on a shared agent, a second user
+  running `login` would get the first user's certificate. An agent is normally personal,
+  but `login` could check the principals or key ID once it knows the identity.
 - `ssh-agent` on Windows (named pipe) is not supported yet.
 
 ### Service operations
