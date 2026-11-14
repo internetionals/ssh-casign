@@ -10,7 +10,7 @@ use ssh_casign_proto::{CertType, ErrorResponse, SignKeyRequest, SignedKeyRespons
 
 use crate::{
     audit,
-    authority::{self, signing::SignatureAlgorithm, SignError, Signer},
+    authority::{self, signing::SignatureAlgorithm, SignError},
     certificate::{
         key_id,
         policy::{self, Policies, Policy},
@@ -271,7 +271,7 @@ async fn issue(
     })?;
     let options = resolved.into_options(client_public_key, cert_type, serial, key_id);
 
-    let signed = provider.sign(&options, algorithm).await?;
+    let signed = provider.issue(&options, algorithm).await?;
     let (certificate, openssh) = (signed.certificate, signed.openssh);
     Ok(Certificate {
         openssh,

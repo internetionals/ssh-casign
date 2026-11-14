@@ -19,7 +19,7 @@ impl AppState {
     pub(super) async fn new(config: Config) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let server_id = config.server_id()?;
         tracing::info!("server_id {server_id}");
-        let authorities = config.authorities.load()?;
+        let authorities = config.authorities.load().await?;
         for (profile, settings) in config.profiles.all() {
             for name in settings.authorities() {
                 if !authorities.contains_key(name) {

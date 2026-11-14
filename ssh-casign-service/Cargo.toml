@@ -3,6 +3,13 @@ name = "ssh-casign-service"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["ca-file"]
+# CA key backends; build only those that make sense for the target platform.
+ca-file = []
+ca-pkcs11 = ["dep:cryptoki"]
+ca-vault = ["dep:p256", "dep:p384", "dep:p521"]
+
 [dependencies]
 base64ct = { version = "1.8.3", features = ["alloc"] }
 axum = { version="0.7.7", features = ["macros"] }
@@ -16,12 +23,19 @@ sha1 = { version = "0.10.7", features = ["oid"] }
 sha2 = { version = "0.10.9", features = ["oid"] }
 signature = "2.2.0"
 regex = "1.10.2"
-reqwest = { version = "0.11.13", features = ["native-tls"] }
+reqwest = { version = "0.11.13", features = ["native-tls", "json"] }
 serde = { version = "1.0.214", features = ["derive", "rc"] }
 serde_json = "1.0.132"
+ssh-encoding = { version = "0.2.0", features = ["alloc"] }
 ssh-key = { version = "0.6.7", features = ["dsa", "p256", "p384", "p521", "ed25519", "rsa"] }
 thiserror = "2.0.3"
 tokio = { version = "1.41.1", features = ["full"] }
 toml = "0.8.19"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+
+# Optional: CA key backends
+cryptoki = { version = "0.12.1", optional = true }
+p256 = { version = "0.13.2", optional = true, features = ["pem"] }
+p384 = { version = "0.13.1", optional = true, features = ["pem"] }
+p521 = { version = "0.13.3", optional = true, features = ["pem"] }

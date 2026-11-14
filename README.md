@@ -104,6 +104,13 @@ and `aud`. `iss` must equal `oidc_provider.issuer`, and `aud` must contain one o
 `oidc_provider.audience` (default: the `client_id`, which is what ID tokens carry).
 `nbf` is checked when present.
 
+### CA key backends
+
+CA keys can be in a file, on a PKCS#11 token (YubiKey, smart card, HSM) or in
+OpenBao/Vault's transit engine; AWS KMS, Azure Key Vault and Google Cloud KMS are
+planned. Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`), so builds
+only contain what their platform needs. See [docs/backends.md](docs/backends.md).
+
 ### Signature algorithms
 
 A certificate carries one CA signature, so what a server can verify depends on the
@@ -204,9 +211,10 @@ comment = "default profile"
 matching_principals = "[a-z][a-z0-9_-]*"
 required_extensions = ["permit-pty"]
 
-# Named signing authorities, referenced by `ssh_ca` in a profile.
+# Named signing authorities, referenced by `ssh_ca` in a profile. The provider is
+# the key backend: file, pkcs11 or vault (see docs/backends.md).
 [authorities.ed25519]
-provider = "file"              # only provider so far: OpenSSH private key on disk
+provider = "file"              # OpenSSH private key on disk
 private_key_file = "ssh-ca"
 cert_types = ["user"]          # "user" and/or "host"
 
@@ -272,7 +280,8 @@ added earlier for the same application name, so the agent doesn't collect keys (
 give up after `MaxAuthTries` attempts).
 
 `logout` forgets the cached sign-in (see below) and removes the keys `login` added to
-the agent for this service; `--keep-agent` only forgets the sign-in.
+the agent for this service; `--keep-agent` only forgets the sign-in. To sign in as
+another user, `logout` first: otherwise the cached sign-in is used.
 
 `cert` only requests a certificate for a public key and writes it out.
 

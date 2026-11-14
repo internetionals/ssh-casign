@@ -19,12 +19,12 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Claims → profile selection             |  🟡   | one `claim == value` per selector; first match wins      |
 | Certificate policy (defaults + limits) |  ✅   | request → token → profile; both limit; docs/policy.md    |
 | Default user extensions                |  ✅   | ssh-keygen's defaults when no extensions are configured  |
-| CA provider abstraction                |  ✅   | `Provider` enum + `Signer` trait, named authorities      |
+| CA key backends                        |  🟡   | file, pkcs11, vault; cloud KMSs planned                  |
 | Several CAs per profile                |  ✅   | ordered; selected by the client's accepted algorithms    |
 | CA signature algorithms                |  ✅   | Ed25519, ECDSA, rsa-sha2-512/256, ssh-rsa (opt-in)       |
 | Client key type and size limits        |  ✅   | `allowed_key_types`, `min_rsa_bits`, `max_rsa_bits`      |
 | File-based CA provider                 |  ✅   | OpenSSH private key, restricts allowed cert types        |
-| Other providers (agent, HSM, KMS)      |  ❌   |                                                          |
+| AWS KMS, Azure Key Vault, GCP KMS      |  ❌   | planned; see docs/backends.md                            |
 | User certificates                      |  ✅   |                                                          |
 | Host certificates                      |  ❌   | refused with 501 until a trust model is designed         |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
@@ -76,6 +76,10 @@ order, unauthenticated client requests, PoC config, silently ignored config keys
 malformed `WWW-Authenticate`, missing-principals 401 instead of 403, client error output.
 
 Policy defaults and limits were added on 2026-11-14 (see [policy.md](policy.md)).
+
+Certificates are now encoded by the service itself (byte-identical to ssh-key, which a
+test checks); backends only sign bytes, and every certificate is verified before it is
+handed out.
 
 Fixed with the signature algorithm work: RSA CAs didn't work at all. ssh-key 0.6.7
 converts RSA keys for the `rsa` crate with the prime `p` twice instead of `p` and `q`,
@@ -180,7 +184,8 @@ Suggested order of work
 5. ~~`ssh-agent` integration and the `login` command.~~ Done.
 6. ~~Serials, claim templates for principals, durable audit log~~ (done), TLS,
    integration tests.
-7. Host certificates and additional CA providers.
+7. Host certificates; ~~CA backends file, PKCS#11, Vault~~ (done), then AWS KMS, Azure
+   Key Vault, GCP KMS.
 8. Serverless deployment (AWS Lambda, Azure Functions, Google Cloud Run functions): the
    audit log already has a `stdout` sink for this. Still needed: listen address from the
    platform's variable (`PORT`, `FUNCTIONS_CUSTOMHANDLER_PORT`), config from environment

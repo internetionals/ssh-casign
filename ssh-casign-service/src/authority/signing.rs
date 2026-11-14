@@ -1,24 +1,25 @@
-//! CA signature algorithms and signing with a chosen algorithm.
+//! CA signature algorithms, and issuing certificates with a backend.
 //!
 //! A certificate carries one CA signature, so the signature algorithm is what
 //! a server has to support. For Ed25519 and ECDSA it follows from the key; an
 //! RSA key can sign as `rsa-sha2-512`, `rsa-sha2-256` or the legacy `ssh-rsa`
 //! (SHA-1, which OpenSSH refuses by default since 8.2, but which some
 //! embedded systems still require).
+//!
+//! Certificates are encoded here and only the signing is left to the
+//! backend, so every backend just signs bytes. Every certificate is verified
+//! before it is handed out.
 
-use std::sync::Mutex;
-
-use base64ct::{Base64, Encoding};
-
-use rsa::{
-    pkcs1v15,
-    signature::{SignatureEncoding, Signer as _},
-};
+use base64ct::{Base64, Encoding as _};
 use serde::{Deserialize, Serialize};
-use ssh_key::{
-    certificate::Builder, private::KeypairData, public::KeyData, Algorithm, Certificate,
-    EcdsaCurve, HashAlg, PrivateKey, Signature,
+use ssh_encoding::Encode;
+use ssh_key::{certificate::CertType, public::KeyData, Certificate, EcdsaCurve};
+
+use super::{
+    encoding::{put_string, put_u32, put_u64},
+    Backend, SignError,
 };
+use crate::certificate::options::CertificateOptions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) enum SignatureAlgorithm {
@@ -67,7 +68,7 @@ impl SignatureAlgorithm {
 
     /// Algorithms a CA key can produce, and which of them are used when the
     /// authority doesn't configure `signature_algorithms` (strongest first;
-    /// never `ssh-rsa`).
+    /// never `ssh-rsa`). Backends may support fewer.
     pub(crate) fn for_key(key: &KeyData) -> Result<(Vec<Self>, Vec<Self>), String> {
         let single = |algorithm| Ok((vec![algorithm], vec![algorithm]));
         match key {
@@ -99,228 +100,192 @@ impl std::fmt::Display for SignatureAlgorithm {
     }
 }
 
-/// A signed certificate.
+/// An issued certificate.
 pub(crate) struct Signed {
-    /// The certificate's fields. For `ssh-rsa` this is the same certificate
-    /// signed with SHA-512: ssh-key can't represent SHA-1 signatures, so only
-    /// [`Signed::openssh`] has the real one.
+    /// The certificate's fields. For `ssh-rsa` the signature's algorithm name
+    /// is relabeled in this view: ssh-key can't represent SHA-1 signatures.
     pub(crate) certificate: Certificate,
     /// The certificate as handed out, in OpenSSH format.
     pub(crate) openssh: String,
 }
 
-/// Sign `builder` with `key` using `algorithm`, which must be one the key
-/// supports (see [`SignatureAlgorithm::for_key`]).
-pub(crate) fn sign(
-    builder: Builder,
-    key: &PrivateKey,
-    algorithm: SignatureAlgorithm,
-) -> Result<Signed, ssh_key::Error> {
-    let certificate = match (key.key_data(), algorithm) {
-        (KeypairData::Rsa(keypair), SignatureAlgorithm::RsaSha512) => {
-            builder.sign(&RsaSigner::new(keypair, Some(HashAlg::Sha512))?)?
-        }
-        (KeypairData::Rsa(keypair), SignatureAlgorithm::RsaSha256) => {
-            builder.sign(&RsaSigner::new(keypair, Some(HashAlg::Sha256))?)?
-        }
-        (KeypairData::Rsa(keypair), SignatureAlgorithm::SshRsa) => {
-            return sign_ssh_rsa(builder, keypair)
-        }
-        // Ed25519 and ECDSA: ssh-key signs these itself.
-        _ => builder.sign(key)?,
-    };
-    let openssh = certificate.to_openssh()?;
-    Ok(Signed {
-        certificate,
-        openssh,
-    })
+/// Algorithm name used for the view of an `ssh-rsa` signed certificate.
+const VIEW_ALGORITHM: &str = "rsa-sha2-512";
+
+fn encode_err(err: impl std::fmt::Display) -> SignError {
+    SignError::Encoding(err.to_string())
 }
 
-/// The `rsa` crate's private key for an ssh-key RSA keypair.
-///
-/// Not `rsa::RsaPrivateKey::try_from(keypair)`: ssh-key 0.6.7 passes the
-/// prime `p` twice instead of `p` and `q` there, which the `rsa` crate (since
-/// it validates keys in `from_components`) rejects. That also breaks
-/// ssh-key's own RSA signing, which is why all RSA signing goes through
-/// [`RsaSigner`].
-fn rsa_private_key(
-    keypair: &ssh_key::private::RsaKeypair,
-) -> Result<rsa::RsaPrivateKey, ssh_key::Error> {
+/// A public key in SSH encoding (algorithm name, then its fields).
+fn encode_key(key: &KeyData) -> Result<Vec<u8>, SignError> {
+    let mut encoded = Vec::new();
+    key.encode(&mut encoded).map_err(encode_err)?;
+    Ok(encoded)
+}
+
+/// Encoded public key without its leading algorithm name, as certificates
+/// contain it.
+fn key_fields(key: &KeyData) -> Result<Vec<u8>, SignError> {
+    let encoded = encode_key(key)?;
+    let name_len = u32::from_be_bytes(encoded[..4].try_into().expect("4 bytes")) as usize;
+    Ok(encoded[4 + name_len..].to_vec())
+}
+
+/// Critical options or extensions: sorted, flags with empty data, values as
+/// a nested string.
+fn encode_options<'a>(options: impl Iterator<Item = (&'a str, &'a str)>) -> Vec<u8> {
+    let mut sorted: Vec<_> = options.collect();
+    sorted.sort();
+    let mut buf = Vec::new();
+    for (name, value) in sorted {
+        put_string(&mut buf, name.as_bytes());
+        if value.is_empty() {
+            put_u32(&mut buf, 0);
+        } else {
+            let mut nested = Vec::new();
+            put_string(&mut nested, value.as_bytes());
+            put_string(&mut buf, &nested);
+        }
+    }
+    buf
+}
+
+/// The to-be-signed part of a certificate (PROTOCOL.certkeys).
+fn encode_tbs(
+    options: &CertificateOptions,
+    ca_key: &KeyData,
+    nonce: &[u8],
+    valid_after: u64,
+    valid_before: u64,
+) -> Result<Vec<u8>, SignError> {
+    let public_key = options.public_key().key_data();
+    let mut buf = Vec::new();
+    put_string(
+        &mut buf,
+        public_key.algorithm().to_certificate_type().as_bytes(),
+    );
+    put_string(&mut buf, nonce);
+    buf.extend(key_fields(public_key)?);
+    put_u64(&mut buf, options.serial().unwrap_or_default());
+    put_u32(
+        &mut buf,
+        match options.cert_type() {
+            CertType::User => 1,
+            CertType::Host => 2,
+        },
+    );
+    put_string(&mut buf, options.key_id().unwrap_or_default().as_bytes());
+    let mut principals = Vec::new();
+    for principal in options.principals() {
+        put_string(&mut principals, principal.as_bytes());
+    }
+    put_string(&mut buf, &principals);
+    put_u64(&mut buf, valid_after);
+    put_u64(&mut buf, valid_before);
+    put_string(&mut buf, &encode_options(options.critical_options()));
+    put_string(&mut buf, &encode_options(options.extensions()));
+    put_string(&mut buf, b"");
+    put_string(&mut buf, &encode_key(ca_key)?);
+    Ok(buf)
+}
+
+fn signature_field(algorithm: &str, data: &[u8]) -> Vec<u8> {
+    let mut blob = Vec::new();
+    put_string(&mut blob, algorithm.as_bytes());
+    put_string(&mut blob, data);
+    let mut field = Vec::new();
+    put_string(&mut field, &blob);
+    field
+}
+
+/// Check an `ssh-rsa` signature, which ssh-key can't verify.
+fn verify_ssh_rsa(ca_key: &KeyData, tbs: &[u8], signature: &[u8]) -> Result<(), SignError> {
+    use rsa::signature::Verifier;
+    let KeyData::Rsa(key) = ca_key else {
+        return Err(SignError::Verification(
+            "ssh-rsa signature by a non-RSA key".into(),
+        ));
+    };
     let uint = |mpint: &ssh_key::Mpint| {
         mpint
             .as_positive_bytes()
             .map(rsa::BigUint::from_bytes_be)
-            .ok_or(ssh_key::Error::Crypto)
+            .ok_or_else(|| SignError::Verification("invalid RSA public key".into()))
     };
-    rsa::RsaPrivateKey::from_components(
-        uint(&keypair.public.n)?,
-        uint(&keypair.public.e)?,
-        uint(&keypair.private.d)?,
-        vec![uint(&keypair.private.p)?, uint(&keypair.private.q)?],
-    )
-    .map_err(|_| ssh_key::Error::Crypto)
+    let public = rsa::RsaPublicKey::new(uint(&key.n)?, uint(&key.e)?)
+        .map_err(|err| SignError::Verification(err.to_string()))?;
+    let signature = rsa::pkcs1v15::Signature::try_from(signature)
+        .map_err(|err| SignError::Verification(err.to_string()))?;
+    rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(public)
+        .verify(tbs, &signature)
+        .map_err(|err| SignError::Verification(err.to_string()))
 }
 
-/// RSA signer for a chosen hash. With `None` (SHA-1) it signs with SHA-512
-/// instead and keeps the to-be-signed data, see [`sign_ssh_rsa`].
-struct RsaSigner {
-    public: KeyData,
-    private: rsa::RsaPrivateKey,
-    hash: Option<HashAlg>,
-    signed_data: Mutex<Option<Vec<u8>>>,
-}
+/// Issue a certificate: encode it, let `backend` sign it with `algorithm`,
+/// and verify the result.
+pub(crate) async fn issue(
+    backend: &dyn Backend,
+    options: &CertificateOptions,
+    algorithm: SignatureAlgorithm,
+) -> Result<Signed, SignError> {
+    let ca_key = backend.public_key();
+    let valid_after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs();
+    let valid_before = valid_after + options.validity().ok_or(SignError::UnknownValidity)?;
+    let nonce: [u8; 32] = rand::random();
+    let tbs = encode_tbs(options, ca_key, &nonce, valid_after, valid_before)?;
 
-impl RsaSigner {
-    fn new(
-        keypair: &ssh_key::private::RsaKeypair,
-        hash: Option<HashAlg>,
-    ) -> Result<Self, ssh_key::Error> {
-        Ok(Self {
-            public: KeyData::Rsa(keypair.public.clone()),
-            private: rsa_private_key(keypair)?,
-            hash,
-            signed_data: Mutex::new(None),
-        })
+    let signature = backend
+        .sign(algorithm, &tbs)
+        .await
+        .map_err(SignError::Backend)?;
+
+    let mut blob = tbs.clone();
+    blob.extend(signature_field(algorithm.as_str(), &signature));
+    let certificate = if algorithm == SignatureAlgorithm::SshRsa {
+        verify_ssh_rsa(ca_key, &tbs, &signature)?;
+        let mut view = tbs;
+        view.extend(signature_field(VIEW_ALGORITHM, &signature));
+        Certificate::from_bytes(&view).map_err(encode_err)?
+    } else {
+        let certificate = Certificate::from_bytes(&blob).map_err(encode_err)?;
+        certificate
+            .verify_signature()
+            .map_err(|err| SignError::Verification(format!("{algorithm}: {err}")))?;
+        certificate
+    };
+    if certificate.signature_key() != ca_key {
+        return Err(SignError::Verification("signed by another key".into()));
     }
 
-    /// Raw PKCS#1 v1.5 signature; `None` is SHA-1.
-    fn raw_signature(
-        &self,
-        hash: Option<HashAlg>,
-        message: &[u8],
-    ) -> Result<Vec<u8>, ssh_key::Error> {
-        let private = self.private.clone();
-        Ok(match hash {
-            Some(HashAlg::Sha256) => pkcs1v15::SigningKey::<sha2::Sha256>::new(private)
-                .sign(message)
-                .to_vec(),
-            Some(HashAlg::Sha512) => pkcs1v15::SigningKey::<sha2::Sha512>::new(private)
-                .sign(message)
-                .to_vec(),
-            None => pkcs1v15::SigningKey::<sha1::Sha1>::new(private)
-                .sign(message)
-                .to_vec(),
-            Some(_) => return Err(ssh_key::Error::AlgorithmUnknown),
-        })
-    }
-}
-
-impl signature::Signer<Signature> for RsaSigner {
-    fn try_sign(&self, message: &[u8]) -> Result<Signature, signature::Error> {
-        let hash = match self.hash {
-            Some(hash) => Some(hash),
-            None => {
-                *self.signed_data.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some(message.to_vec());
-                Some(HashAlg::Sha512)
-            }
-        };
-        self.raw_signature(hash, message)
-            .and_then(|data| Signature::new(Algorithm::Rsa { hash }, data))
-            .map_err(|_| signature::Error::new())
-    }
-}
-
-impl From<&RsaSigner> for KeyData {
-    fn from(signer: &RsaSigner) -> Self {
-        signer.public.clone()
-    }
-}
-
-/// `ssh-rsa` certificates. ssh-key can neither verify nor represent SHA-1
-/// signatures, and its builder checks the new certificate in debug builds.
-/// So the builder signs with SHA-512 while the to-be-signed data is captured;
-/// that data is then signed with SHA-1 and encoded by hand, with the SHA-1
-/// signature as the certificate's last field.
-fn sign_ssh_rsa(
-    builder: Builder,
-    keypair: &ssh_key::private::RsaKeypair,
-) -> Result<Signed, ssh_key::Error> {
-    let signer = RsaSigner::new(keypair, None)?;
-    let certificate = builder.sign(&signer)?;
-    let signed_data = signer
-        .signed_data
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-        .ok_or(ssh_key::Error::Crypto)?;
-    let signature = signer.raw_signature(None, &signed_data)?;
-
-    let mut blob = Vec::new();
-    put_string(&mut blob, b"ssh-rsa");
-    put_string(&mut blob, &signature);
-    let mut encoded = signed_data;
-    put_string(&mut encoded, &blob);
-    let openssh = format!(
+    let mut openssh = format!(
         "{} {}",
         certificate.algorithm().to_certificate_type(),
-        Base64::encode_string(&encoded)
+        Base64::encode_string(&blob)
     );
+    if let Some(comment) = options.comment() {
+        openssh.push(' ');
+        openssh.push_str(comment);
+    }
     Ok(Signed {
         certificate,
         openssh,
     })
-}
-
-fn put_string(buf: &mut Vec<u8>, bytes: &[u8]) {
-    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-    buf.extend_from_slice(bytes);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsa::signature::Verifier as _;
-
-    fn builder(public_key: KeyData) -> Builder {
-        let mut builder =
-            Builder::new(vec![7; 32], public_key, 1_800_000_000, 1_800_003_600).unwrap();
-        builder.valid_principal("alice").unwrap();
-        builder
-    }
-
-    fn user_key() -> KeyData {
-        KeyData::Ed25519(ssh_key::private::Ed25519Keypair::from_seed(&[1; 32]).public)
-    }
-
-    /// The signed data, signature algorithm and raw signature of a
-    /// certificate in OpenSSH format. The signature is the last field:
-    /// string(string(algorithm), string(signature)).
-    fn split_signature(openssh: &str) -> (Vec<u8>, String, Vec<u8>) {
-        let bytes = Base64::decode_vec(openssh.split(' ').nth(1).unwrap()).unwrap();
-        let read = |buf: &[u8], at: usize| -> Option<(Vec<u8>, usize)> {
-            let len = u32::from_be_bytes(buf.get(at..at + 4)?.try_into().ok()?) as usize;
-            Some((buf.get(at + 4..at + 4 + len)?.to_vec(), at + 4 + len))
-        };
-        // RSA signature of a 2048-bit key: 256 bytes, so the field's length
-        // only depends on the algorithm name.
-        for algorithm_len in ["ssh-rsa".len(), "rsa-sha2-256".len()] {
-            let start = bytes.len() - (4 + 4 + algorithm_len + 4 + 256);
-            let Some((blob, end)) = read(&bytes, start) else {
-                continue;
-            };
-            if end != bytes.len() {
-                continue;
-            }
-            let (algorithm, at) = read(&blob, 0).unwrap();
-            let (signature, _) = read(&blob, at).unwrap();
-            return (
-                bytes[..start].to_vec(),
-                String::from_utf8(algorithm).unwrap(),
-                signature,
-            );
-        }
-        panic!("no RSA signature field at the end");
-    }
 
     #[test]
-    fn algorithms_for_keys() {
-        let (possible, default) = SignatureAlgorithm::for_key(&user_key()).unwrap();
-        assert_eq!(possible, [SignatureAlgorithm::Ed25519]);
-        assert_eq!(default, [SignatureAlgorithm::Ed25519]);
+    fn algorithm_names() {
         for name in [
             "ssh-ed25519",
+            "ecdsa-sha2-nistp256",
             "ecdsa-sha2-nistp384",
+            "ecdsa-sha2-nistp521",
+            "rsa-sha2-512",
             "rsa-sha2-256",
             "ssh-rsa",
         ] {
@@ -330,62 +295,61 @@ mod tests {
     }
 
     #[test]
-    fn ed25519_signature() {
-        let ca = PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[2; 32]));
-        let signed = sign(builder(user_key()), &ca, SignatureAlgorithm::Ed25519).unwrap();
-        assert_eq!(
-            signed.certificate.signature().algorithm().as_str(),
-            "ssh-ed25519"
-        );
-        assert_eq!(signed.openssh, signed.certificate.to_openssh().unwrap());
+    fn options_are_sorted_and_values_nested() {
+        let encoded =
+            encode_options([("permit-pty", ""), ("force-command", "/bin/true")].into_iter());
+        let mut expected = Vec::new();
+        put_string(&mut expected, b"force-command");
+        let mut nested = Vec::new();
+        put_string(&mut nested, b"/bin/true");
+        put_string(&mut expected, &nested);
+        put_string(&mut expected, b"permit-pty");
+        put_u32(&mut expected, 0);
+        assert_eq!(encoded, expected);
     }
 
+    /// Our encoding must match ssh-key's byte for byte.
     #[test]
-    fn rsa_signatures_with_each_hash() {
-        // A fixed key (generated with ssh-keygen; used only by these tests),
-        // so the tests don't spend seconds generating RSA keys.
-        let ca = PrivateKey::from_openssh(include_str!("testdata/rsa-ca")).unwrap();
-        let KeypairData::Rsa(keypair) = ca.key_data() else {
-            unreachable!()
-        };
-        let rsa_key = rsa_private_key(keypair).unwrap();
-        let (possible, default) = SignatureAlgorithm::for_key(ca.public_key().key_data()).unwrap();
-        assert!(possible.contains(&SignatureAlgorithm::SshRsa));
+    fn tbs_matches_ssh_key() {
+        let ca = ssh_key::PrivateKey::from(ssh_key::private::Ed25519Keypair::from_seed(&[2; 32]));
+        let user = ssh_key::private::Ed25519Keypair::from_seed(&[3; 32]);
+        let mut options =
+            CertificateOptions::new_user(ssh_key::PublicKey::from(KeyData::Ed25519(user.public)));
+        options.add_principal("alice");
+        options.add_principal("deploy");
+        options.set_key_id("ca1:default:alice:-");
+        options.set_serial(42);
+        options.set_validity(3600);
+        options.set_extension("permit-pty", "");
+        options.set_extension("permit-agent-forwarding", "");
+        options.set_critical_option("source-address", "10.0.0.0/8");
+
+        let nonce = [9u8; 32];
+        let tbs = encode_tbs(&options, ca.public_key().key_data(), &nonce, 1000, 4600).unwrap();
+
+        let mut builder = ssh_key::certificate::Builder::new(
+            nonce.to_vec(),
+            KeyData::Ed25519(user.public),
+            1000,
+            4600,
+        )
+        .unwrap();
+        builder.serial(42).unwrap();
+        builder.key_id("ca1:default:alice:-").unwrap();
+        builder.valid_principal("alice").unwrap();
+        builder.valid_principal("deploy").unwrap();
+        builder.extension("permit-pty", "").unwrap();
+        builder.extension("permit-agent-forwarding", "").unwrap();
+        builder
+            .critical_option("source-address", "10.0.0.0/8")
+            .unwrap();
+        let reference = builder.sign(&ca).unwrap().to_bytes().unwrap();
         assert!(
-            !default.contains(&SignatureAlgorithm::SshRsa),
-            "SHA-1 only when enabled"
+            reference.starts_with(&tbs),
+            "TBS differs from ssh-key's encoding"
         );
-
-        let public = rsa::RsaPublicKey::from(&rsa_key);
-        for (algorithm, name) in [
-            (SignatureAlgorithm::RsaSha512, "rsa-sha2-512"),
-            (SignatureAlgorithm::RsaSha256, "rsa-sha2-256"),
-            (SignatureAlgorithm::SshRsa, "ssh-rsa"),
-        ] {
-            let signed = sign(builder(user_key()), &ca, algorithm).unwrap();
-            let certificate = &signed.certificate;
-            assert_eq!(certificate.valid_principals(), ["alice"]);
-            assert_eq!(certificate.signature_key(), ca.public_key().key_data());
-            assert!(signed
-                .openssh
-                .starts_with("ssh-ed25519-cert-v01@openssh.com "));
-
-            let (signed_data, blob_algorithm, signature) = split_signature(&signed.openssh);
-            assert_eq!(blob_algorithm, name);
-            let signature = rsa::pkcs1v15::Signature::try_from(signature.as_slice()).unwrap();
-            let verified = match algorithm {
-                SignatureAlgorithm::RsaSha512 => {
-                    rsa::pkcs1v15::VerifyingKey::<sha2::Sha512>::new(public.clone())
-                        .verify(&signed_data, &signature)
-                }
-                SignatureAlgorithm::RsaSha256 => {
-                    rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(public.clone())
-                        .verify(&signed_data, &signature)
-                }
-                _ => rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(public.clone())
-                    .verify(&signed_data, &signature),
-            };
-            assert!(verified.is_ok(), "{name} signature must verify");
-        }
+        let signature = &reference[tbs.len()..];
+        let len = u32::from_be_bytes(signature[..4].try_into().unwrap()) as usize;
+        assert_eq!(signature.len(), 4 + len, "only the signature follows");
     }
 }
