@@ -31,6 +31,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Host certificates                      |  ❌   | refused with 501 until a trust model is designed         |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
 | Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |
+| Behind proxies and CDNs                |  ✅   | `trusted_proxies`, XFF/RFC 7239/CF headers, `CF-Ray`     |
 | Serial numbers                         |  ✅   | random non-zero 64-bit; `{{serial}}` in key ID templates |
 | Config path, listen address            |  ✅   | argument or `SSH_CASIGN_CONFIG`; `listen` in config      |
 | Strict config parsing                  |  ✅   | unknown keys are an error                                |
@@ -164,7 +165,8 @@ values, for example a `comment` template, or `matching_*` patterns built from cl
   calling `expect()`.
 - Terminate TLS in the service (`axum-server` + rustls), or document that it must run
   behind a TLS proxy.
-- `GET /healthz`, request IDs in tracing spans, and rate limiting on `/sign`.
+- `GET /healthz` and request IDs in tracing spans. Rate limiting on `/sign` is left to
+  a proxy or CDN in front (docs/audit.md, "Behind a reverse proxy or CDN").
 - Host certificates need a different trust model than user OIDC logins: for example
   machine identity, the client credentials grant with a per-host client, or an
   administrator approving the request. Design this separately before building it.

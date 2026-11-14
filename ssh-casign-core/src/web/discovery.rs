@@ -43,10 +43,17 @@ pub(super) fn document(
     Ok(serde_json::to_string_pretty(&info)?)
 }
 
+/// How long clients and caches may keep the discovery document. Short, so
+/// configuration changes (new authorities, rotated keys) arrive quickly.
+const DISCOVERY_MAX_AGE: &str = "max-age=300";
+
 /// `GET /.well-known/ssh-casign`
 pub(super) async fn discovery(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "application/json")],
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, DISCOVERY_MAX_AGE),
+        ],
         state.discovery_document.clone(),
     )
 }

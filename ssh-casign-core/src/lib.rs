@@ -8,6 +8,7 @@
 mod audit;
 mod certificate;
 mod config;
+mod proxy;
 mod web;
 
 pub use config::Config;

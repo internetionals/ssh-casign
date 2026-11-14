@@ -91,6 +91,7 @@ cert_types = ["user"]
 
 [audit]
 client_address_header = "x-forwarded-for"   # Azure's front end sets it ("IP:port")
+trusted_proxies = ["127.0.0.1/32", "::1/128"] # the Functions host, over loopback
 
 [[audit.sink]]
 type = "stdout"

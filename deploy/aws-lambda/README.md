@@ -100,6 +100,7 @@ cert_types = ["user"]
 
 [audit]
 client_address_header = "x-forwarded-for"   # set by Function URLs and API Gateway
+trusted_proxies = ["127.0.0.1/32", "::1/128"] # the Web Adapter, over loopback
 
 [[audit.sink]]
 type = "stdout"

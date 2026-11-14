@@ -83,6 +83,7 @@ cert_types = ["user"]
 
 [audit]
 client_address_header = "x-forwarded-for"
+trusted_proxies = ["0.0.0.0/0", "::/0"]  # Google's front end; only it reaches the service
 # client_address_skip = 1   # behind an external Application Load Balancer
 
 [[audit.sink]]

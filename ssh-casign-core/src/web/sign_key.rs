@@ -131,23 +131,13 @@ pub(super) async fn sign_key(
     };
     let result = issue(&state, &claims, payload, &mut context).await;
 
-    let (client_address_header, client_address_skip) = state
-        .config
-        .audit
-        .as_ref()
-        .map(|audit| {
-            (
-                audit.client_address_header.as_deref(),
-                audit.client_address_skip,
-            )
-        })
-        .unwrap_or_default();
-    let (client_ip, client_port) =
-        audit::client_address(peer, client_address_header, client_address_skip, &headers);
+    let origin = state.origin.resolve(peer, &headers);
     let requester = audit::Requester {
         request_id: &request_id,
-        client_ip,
-        client_port,
+        client_ip: origin.client_ip,
+        client_port: origin.client_port,
+        proxy: origin.proxy,
+        correlation_id: origin.correlation_id.as_deref(),
         issuer: state.config.oidc_provider.issuer(),
         subject: claims.get("sub").and_then(|sub| sub.as_str()),
         oidc_id: context.oidc_id.as_deref(),
@@ -299,6 +289,7 @@ async fn record_issued(
     let certificate = &issued.certificate;
     tracing::info!(
         request_id = requester.request_id,
+        correlation_id = requester.correlation_id,
         serial = certificate.serial(),
         key_id = certificate.key_id(),
         profile = requester.profile,

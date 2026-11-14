@@ -13,6 +13,8 @@ pub(super) struct AppState {
     /// Pre-serialized discovery document (it only depends on the config).
     pub(super) discovery_document: String,
     pub(super) audit: Option<Arc<crate::audit::AuditLog>>,
+    /// Client address and correlation ID behind proxies.
+    pub(super) origin: crate::proxy::Resolver,
 }
 
 impl AppState {
@@ -39,6 +41,10 @@ impl AppState {
                 None
             }
         };
+        let origin = match &config.audit {
+            Some(audit) => audit.origin_resolver()?,
+            None => crate::proxy::Resolver::default(),
+        };
         Ok(Arc::new(Self {
             config,
             server_id,
@@ -46,6 +52,7 @@ impl AppState {
             authorities,
             discovery_document,
             audit,
+            origin,
         }))
     }
 }

@@ -125,6 +125,14 @@ Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`,
 platform needs. See
 [docs/backends.md](docs/backends.md).
 
+### Behind a proxy or CDN
+
+The service needs no public URL setting (the discovery document's sign endpoint is
+relative, so path prefixes work). For the client address in the audit log, set
+`client_address_header` and `trusted_proxies`; Cloudflare's `CF-Ray` can be recorded as
+a correlation ID. See [docs/audit.md](docs/audit.md) for Cloudflare (proxy or tunnel)
+and nginx examples.
+
 ### Serverless
 
 The service runs as an ordinary HTTP server, so serverless platforms only need the

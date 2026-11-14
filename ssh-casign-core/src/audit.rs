@@ -44,15 +44,21 @@ pub(crate) struct Config {
     /// Also record denied requests of authenticated clients.
     #[serde(default = "default_true")]
     record_denials: bool,
-    /// Take the client address from this header (rightmost entry, the one
-    /// the trusted proxy added), e.g. `x-forwarded-for` behind a load
-    /// balancer or API gateway. Without it, the TCP peer address is used.
-    pub(crate) client_address_header: Option<String>,
-    /// Entries at the end of `client_address_header` that further trusted
-    /// proxies add after the client address (e.g. 1 behind Google's external
-    /// load balancer, which appends its own address). Default 0.
+    /// Take the client address from this header, e.g. `x-forwarded-for`,
+    /// `forwarded` (RFC 7239), `cf-connecting-ip` or `x-real-ip`. Without
+    /// it, the TCP peer address is used. See [`crate::proxy`].
+    client_address_header: Option<String>,
+    /// Entries at the end of `client_address_header` that proxies with
+    /// unknown addresses add after the client address (e.g. 1 behind
+    /// Google's external load balancer). Default 0.
     #[serde(default)]
-    pub(crate) client_address_skip: usize,
+    client_address_skip: usize,
+    /// Address ranges of trusted proxies. When set, forwarding headers are
+    /// only used from these peers, and these addresses are skipped in
+    /// `client_address_header`. When unset, every peer is believed.
+    trusted_proxies: Option<Vec<String>>,
+    /// A trusted proxy's request ID to record, e.g. `cf-ray`.
+    correlation_id_header: Option<String>,
     /// CEF header "Device Vendor".
     #[serde(default = "default_vendor")]
     device_vendor: String,
@@ -151,6 +157,17 @@ fn facility_code(name: &str) -> Option<u8> {
 }
 
 impl Config {
+    /// How request origins are determined.
+    pub(crate) fn origin_resolver(&self) -> Result<crate::proxy::Resolver, String> {
+        crate::proxy::Resolver::new(crate::proxy::Settings {
+            header: self.client_address_header.as_deref(),
+            skip: self.client_address_skip,
+            trusted_proxies: self.trusted_proxies.as_deref(),
+            correlation_id_header: self.correlation_id_header.as_deref(),
+        })
+        .map_err(|err| format!("audit: {err}"))
+    }
+
     /// Set up all sinks, failing if a required one can't be used.
     pub(crate) fn open(
         &self,
@@ -470,6 +487,11 @@ pub(crate) struct Requester<'a> {
     pub(crate) client_ip: IpAddr,
     /// TCP port, when the address is the TCP peer.
     pub(crate) client_port: Option<u16>,
+    /// The proxy that delivered the request, when the client address came
+    /// from a header.
+    pub(crate) proxy: Option<SocketAddr>,
+    /// The proxy's request ID (`correlation_id_header`).
+    pub(crate) correlation_id: Option<&'a str>,
     pub(crate) issuer: &'a str,
     /// The token's `sub`.
     pub(crate) subject: Option<&'a str>,
@@ -567,6 +589,14 @@ impl Event<'_> {
         ];
         if let Some(port) = requester.client_port {
             extensions.push(("spt", port.to_string()));
+        }
+        if let Some(proxy) = requester.proxy {
+            extensions.push(("proxyAddress", proxy.ip().to_string()));
+            extensions.push(("proxyPort", proxy.port().to_string()));
+        }
+        if let Some(correlation_id) = requester.correlation_id {
+            extensions.push(("flexString2Label", "correlationId".to_string()));
+            extensions.push(("flexString2", correlation_id.to_string()));
         }
         if let Some(oidc_id) = requester.oidc_id {
             extensions.push(("suser", oidc_id.to_string()));
@@ -679,40 +709,6 @@ pub(crate) fn new_request_id() -> String {
     format!("{:032x}", rand::random::<u128>())
 }
 
-/// Client address: from `header` if configured and present, the entry
-/// `skip` places from the right (the one the outermost trusted proxy added),
-/// else the TCP peer. Several header lines count as one list, in order.
-pub(crate) fn client_address(
-    peer: SocketAddr,
-    header: Option<&str>,
-    skip: usize,
-    headers: &axum::http::HeaderMap,
-) -> (IpAddr, Option<u16>) {
-    let entries: Vec<String> = header
-        .map(|name| {
-            headers
-                .get_all(name)
-                .iter()
-                .filter_map(|value| value.to_str().ok())
-                .flat_map(|value| value.split(','))
-                .map(|entry| entry.trim().to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let forwarded = entries.iter().rev().nth(skip).and_then(|entry| {
-        // Azure App Service / Functions add "IP:port".
-        let entry = entry.trim();
-        entry
-            .parse::<IpAddr>()
-            .ok()
-            .or_else(|| entry.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
-    });
-    match forwarded {
-        Some(ip) => (ip, None),
-        None => (peer.ip(), Some(peer.port())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -742,6 +738,8 @@ mod tests {
             request_id: "r1",
             client_ip: "192.0.2.7".parse().unwrap(),
             client_port: Some(5000),
+            proxy: None,
+            correlation_id: None,
             issuer: "https://idp.example.com",
             subject: Some("123"),
             oidc_id: Some("alice@example.com"),
@@ -861,6 +859,39 @@ mod tests {
     }
 
     #[test]
+    fn proxy_fields_in_cef() {
+        let proxied = Requester {
+            client_port: None,
+            proxy: Some("[2400:cb00::1]:443".parse().unwrap()),
+            correlation_id: Some("8f1c2a3b4c5d6e7f-AMS"),
+            ..requester()
+        };
+        let event = Event {
+            server_id: "ca1",
+            requester: &proxied,
+            outcome: Outcome::Denied {
+                status: 403,
+                reason: "no",
+            },
+        };
+        let cef = event.to_cef(&header());
+        let fields = parse_extensions(cef.splitn(8, '|').nth(7).unwrap());
+        assert_eq!(fields["src"], "192.0.2.7");
+        assert!(!fields.contains_key("spt"));
+        assert_eq!(fields["proxyAddress"], "2400:cb00::1");
+        assert_eq!(fields["proxyPort"], "443");
+        assert_eq!(fields["flexString2Label"], "correlationId");
+        assert_eq!(fields["flexString2"], "8f1c2a3b4c5d6e7f-AMS");
+        // Not present for direct requests.
+        let plain = Event {
+            requester: &requester(),
+            ..event
+        }
+        .to_cef(&header());
+        assert!(!plain.contains("proxyAddress") && !plain.contains("flexString2"));
+    }
+
+    #[test]
     fn denied_event_as_cef() {
         let requester = requester();
         let event = Event {
@@ -884,68 +915,6 @@ mod tests {
         assert_eq!(fields["dvchost"], "ca|1");
         assert!(!fields.contains_key("flexString1"));
         assert!(!cef.contains('\n'));
-    }
-
-    #[test]
-    fn client_address_from_header() {
-        let peer: SocketAddr = "10.0.0.1:443".parse().unwrap();
-        let mut headers = axum::http::HeaderMap::new();
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 0, &headers),
-            (peer.ip(), Some(443))
-        );
-        headers.insert(
-            "x-forwarded-for",
-            "203.0.113.9, 198.51.100.2".parse().unwrap(),
-        );
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 0, &headers),
-            ("198.51.100.2".parse().unwrap(), None)
-        );
-        assert_eq!(
-            client_address(peer, None, 0, &headers),
-            (peer.ip(), Some(443))
-        );
-        headers.insert("x-forwarded-for", "203.0.113.9:54321".parse().unwrap());
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 0, &headers),
-            ("203.0.113.9".parse().unwrap(), None)
-        );
-        headers.insert("x-forwarded-for", "[2001:db8::7]:443".parse().unwrap());
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 0, &headers),
-            ("2001:db8::7".parse().unwrap(), None)
-        );
-        // Behind a load balancer that appends its own address: skip 1.
-        headers.insert(
-            "x-forwarded-for",
-            "198.51.100.66, 203.0.113.9, 130.211.0.1".parse().unwrap(),
-        );
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 1, &headers),
-            ("203.0.113.9".parse().unwrap(), None)
-        );
-        // Fewer entries than expected: someone bypassed the proxy; use the peer.
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 5, &headers),
-            (peer.ip(), Some(443))
-        );
-        // Several header lines are one list.
-        headers.remove("x-forwarded-for");
-        headers.append("x-forwarded-for", "198.51.100.66".parse().unwrap());
-        headers.append(
-            "x-forwarded-for",
-            "203.0.113.9, 130.211.0.1".parse().unwrap(),
-        );
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 1, &headers),
-            ("203.0.113.9".parse().unwrap(), None)
-        );
-        headers.insert("x-forwarded-for", "garbage".parse().unwrap());
-        assert_eq!(
-            client_address(peer, Some("x-forwarded-for"), 0, &headers),
-            (peer.ip(), Some(443))
-        );
     }
 
     fn config(toml: &str) -> Config {
