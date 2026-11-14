@@ -5,6 +5,18 @@ use url::Url;
 
 use crate::error::Result;
 
+/// The service rejected the token (401).
+#[derive(Debug)]
+pub(crate) struct Unauthorized(String);
+
+impl std::fmt::Display for Unauthorized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Sign request rejected (401 Unauthorized): {}", self.0)
+    }
+}
+
+impl std::error::Error for Unauthorized {}
+
 pub(crate) async fn sign(
     http: &reqwest::Client,
     sign_endpoint: &Url,
@@ -34,6 +46,9 @@ pub(crate) async fn sign(
                 .unwrap_or("unknown error")
                 .to_string(),
         };
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(Unauthorized(detail).into());
+        }
         bail!("Sign request rejected ({status}): {detail}");
     }
 

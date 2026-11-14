@@ -4,9 +4,10 @@ use url::Url;
 
 mod cert;
 mod login;
+mod logout;
 mod request;
 
-use crate::config::{Config, SignInMethod};
+use crate::config::{Config, SignInMethod, TokenStore};
 use crate::error::{Report, Result, WrapErr};
 pub(crate) type CmdResult = Result<Option<String>>;
 
@@ -16,6 +17,8 @@ enum Cmd {
     Cert(cert::Args),
     /// Sign in and add a key with a fresh certificate to ssh-agent
     Login(login::Args),
+    /// Forget the cached sign-in and remove the keys login added to ssh-agent
+    Logout(logout::Args),
 }
 
 #[derive(Parser)]
@@ -37,6 +40,10 @@ pub(crate) struct Args {
     #[arg(long, global = true, value_enum, env = "SSH_CASIGN_SIGN_IN")]
     sign_in: Option<SignInMethod>,
 
+    /// Where to keep refresh tokens; overrides the config file
+    #[arg(long, global = true, value_enum, env = "SSH_CASIGN_TOKEN_STORE")]
+    token_store: Option<TokenStore>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -49,6 +56,7 @@ pub(crate) struct Target {
     pub(crate) client_id: Option<String>,
     pub(crate) scopes: Option<Vec<String>>,
     pub(crate) app_name: Option<String>,
+    pub(crate) token_store: TokenStore,
 }
 
 fn resolve_target(args: &Args, config: &Config) -> Result<Target> {
@@ -78,6 +86,10 @@ fn resolve_target(args: &Args, config: &Config) -> Result<Target> {
         app_name: profile
             .and_then(|profile| profile.app_name.clone())
             .or_else(|| config.app_name.clone()),
+        token_store: args
+            .token_store
+            .or(profile.and_then(|profile| profile.token_store))
+            .unwrap_or(config.token_store),
     })
 }
 
@@ -86,6 +98,7 @@ pub(crate) fn run_with_config(args: &Args, config: &Config) -> CmdResult {
     match &args.cmd {
         Cmd::Cert(cert_args) => cert::run(cert_args, &target),
         Cmd::Login(login_args) => login::run(login_args, &target),
+        Cmd::Logout(logout_args) => logout::run(logout_args, &target),
     }
 }
 

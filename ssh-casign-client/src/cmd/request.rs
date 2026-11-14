@@ -7,7 +7,7 @@ use color_eyre::eyre::WrapErr;
 use ssh_casign_proto::{CertType, SignKeyRequest};
 use ssh_key::{public::KeyData, Certificate, PublicKey};
 
-use crate::{auth, discovery, error::Result};
+use crate::{auth, discovery, error::Result, sign, token_store::StoredToken};
 
 /// Application name when none is configured.
 const DEFAULT_APP_NAME: &str = "ssh-casign-client";
@@ -147,10 +147,13 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
         .wrap_err("Failed to create tokio runtime")
 }
 
-/// Public keys of the service's signing authorities, from its discovery
-/// document (no sign-in needed).
-pub(super) fn service_authorities(target: &super::Target) -> Result<Vec<KeyData>> {
-    let service = runtime()?.block_on(discovery::discover(&reqwest::Client::new(), &target.url))?;
+/// The service's discovery document (no sign-in needed).
+pub(super) fn discover_service(target: &super::Target) -> Result<discovery::Service> {
+    runtime()?.block_on(discovery::discover(&reqwest::Client::new(), &target.url))
+}
+
+/// Public keys of the service's signing authorities.
+pub(super) fn service_authorities(service: &discovery::Service) -> Result<Vec<KeyData>> {
     service
         .info
         .authorities
@@ -164,7 +167,19 @@ pub(super) fn service_authorities(target: &super::Target) -> Result<Vec<KeyData>
         .collect()
 }
 
+/// Where the refresh token for this service's IdP is kept.
+pub(super) fn stored_token(target: &super::Target, service: &discovery::Service) -> StoredToken {
+    StoredToken::new(
+        target.token_store,
+        &service.info.issuer,
+        target.client_id.as_ref().unwrap_or(&service.info.client_id),
+    )
+}
+
 /// Discover the service, sign in and request the certificate.
+///
+/// If the service rejects a token obtained with a cached refresh token, the
+/// cache is dropped and the user signs in interactively once.
 pub(super) fn obtain_certificate(
     target: &super::Target,
     sign_key_request: &SignKeyRequest,
@@ -172,18 +187,28 @@ pub(super) fn obtain_certificate(
     runtime()?.block_on(async {
         let http = reqwest::Client::new();
         let service = discovery::discover(&http, &target.url).await?;
-        let scopes = target.scopes.as_ref().unwrap_or(&service.info.scopes);
-        let token = auth::sign_in(
-            &http,
-            &auth::SignInRequest {
-                method: target.sign_in,
-                issuer: &service.info.issuer,
-                client_id: target.client_id.as_ref().unwrap_or(&service.info.client_id),
-                scopes,
-            },
-        )
-        .await?;
-        crate::sign::sign(&http, &service.sign_endpoint, &token, sign_key_request).await
+        let stored = stored_token(target, &service);
+        let request = auth::SignInRequest {
+            method: target.sign_in,
+            issuer: &service.info.issuer,
+            client_id: target.client_id.as_ref().unwrap_or(&service.info.client_id),
+            scopes: target.scopes.as_ref().unwrap_or(&service.info.scopes),
+        };
+        let (token, source) = auth::sign_in(&http, &request, &stored, true).await?;
+        match sign::sign(&http, &service.sign_endpoint, &token, sign_key_request).await {
+            Err(err)
+                if source == auth::TokenSource::Refreshed
+                    && err.downcast_ref::<sign::Unauthorized>().is_some() =>
+            {
+                tracing::info!("the service rejected the refreshed token, signing in again: {err}");
+                if let Err(err) = stored.delete() {
+                    tracing::warn!("can't remove the cached refresh token: {err:#}");
+                }
+                let (token, _) = auth::sign_in(&http, &request, &stored, false).await?;
+                sign::sign(&http, &service.sign_endpoint, &token, sign_key_request).await
+            }
+            result => result,
+        }
     })
 }
 

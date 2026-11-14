@@ -30,7 +30,9 @@ use zeroize::Zeroizing;
 
 use super::{
     cert::{certificate_file_for, read_public_key},
-    request::{obtain_certificate, parse_duration, service_authorities, RequestArgs},
+    request::{
+        discover_service, obtain_certificate, parse_duration, service_authorities, RequestArgs,
+    },
 };
 use crate::{agent, error::Result};
 
@@ -86,7 +88,7 @@ fn try_reuse(args: &Args, target: &super::Target) -> Option<(Certificate, Outcom
         return None;
     }
     let found = (|| -> Result<Option<(Certificate, Outcome)>> {
-        let authorities = service_authorities(target)?;
+        let authorities = service_authorities(&discover_service(target)?)?;
         let criteria = Criteria {
             authorities: &authorities,
             now: now()?,
@@ -277,7 +279,7 @@ fn agent_comment(app_name: &str, key_id: &str) -> String {
 }
 
 /// The application name from a comment written by [`agent_comment`].
-fn comment_app_name(comment: &str) -> Option<String> {
+pub(super) fn comment_app_name(comment: &str) -> Option<String> {
     let encoded = comment.strip_prefix(COMMENT_PREFIX)?.split(' ').next()?;
     let mut bytes = Vec::new();
     let mut rest = encoded.as_bytes();

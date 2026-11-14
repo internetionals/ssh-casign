@@ -2,7 +2,7 @@ use color_eyre::eyre::{bail, eyre, WrapErr};
 use serde::Deserialize;
 use url::Url;
 
-use crate::{config::SignInMethod, error::Result};
+use crate::{config::SignInMethod, error::Result, token_store::StoredToken};
 
 mod authorization_code;
 mod device;
@@ -58,6 +58,7 @@ pub(crate) struct SignInRequest<'a> {
 pub(crate) struct TokenResponse {
     access_token: String,
     id_token: Option<String>,
+    refresh_token: Option<String>,
 }
 
 impl TokenResponse {
@@ -95,14 +96,57 @@ impl std::fmt::Display for OAuthError {
     }
 }
 
+/// How the bearer token was obtained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TokenSource {
+    /// From `SSH_CASIGN_TOKEN`.
+    Environment,
+    /// With a cached refresh token, without user interaction.
+    Refreshed,
+    /// Through the interactive sign-in flow.
+    Interactive,
+}
+
 /// Sign the user in and return the bearer token for the service.
-pub(crate) async fn sign_in(http: &reqwest::Client, request: &SignInRequest<'_>) -> Result<String> {
+///
+/// With `allow_refresh`, a cached refresh token is tried first. Refresh
+/// tokens the IdP hands out are cached for the next run.
+pub(crate) async fn sign_in(
+    http: &reqwest::Client,
+    request: &SignInRequest<'_>,
+    stored: &StoredToken,
+    allow_refresh: bool,
+) -> Result<(String, TokenSource)> {
     if let Ok(token) = std::env::var(TOKEN_ENV) {
         tracing::debug!("using token from {TOKEN_ENV}");
-        return Ok(token);
+        return Ok((token, TokenSource::Environment));
     }
 
     let provider = ProviderMetadata::discover(http, request.issuer).await?;
+    if allow_refresh {
+        if let Some(refresh_token) = stored.load() {
+            match refresh(
+                http,
+                &provider.token_endpoint,
+                request.client_id,
+                &refresh_token,
+            )
+            .await
+            {
+                Ok(token) => {
+                    tracing::debug!("signed in with the cached refresh token");
+                    return Ok((store_and_take_bearer(token, stored), TokenSource::Refreshed));
+                }
+                Err(err) => {
+                    tracing::info!("cached sign-in no longer valid, signing in again: {err:#}");
+                    if let Err(err) = stored.delete() {
+                        tracing::warn!("can't remove the cached refresh token: {err:#}");
+                    }
+                }
+            }
+        }
+    }
+
     tracing::debug!(
         "signing in as client {} with scopes {:?} at token endpoint {}",
         request.client_id,
@@ -146,5 +190,47 @@ pub(crate) async fn sign_in(http: &reqwest::Client, request: &SignInRequest<'_>)
             .await?
         }
     };
-    Ok(token.into_bearer())
+    if token.refresh_token.is_none() {
+        tracing::debug!(
+            "the IdP returned no refresh token (does it need the offline_access scope?)"
+        );
+    }
+    Ok((
+        store_and_take_bearer(token, stored),
+        TokenSource::Interactive,
+    ))
+}
+
+/// Cache the (possibly rotated) refresh token and return the bearer token.
+fn store_and_take_bearer(mut token: TokenResponse, stored: &StoredToken) -> String {
+    if let Some(refresh_token) = token.refresh_token.take() {
+        stored.save(&refresh_token);
+    }
+    token.into_bearer()
+}
+
+/// Refresh token grant (RFC 6749 section 6). The scope is left out, which
+/// means the scope originally granted.
+async fn refresh(
+    http: &reqwest::Client,
+    token_endpoint: &Url,
+    client_id: &str,
+    refresh_token: &str,
+) -> Result<TokenResponse> {
+    let response = http
+        .post(token_endpoint.clone())
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+        ])
+        .send()
+        .await
+        .wrap_err_with(|| format!("Token request to {token_endpoint} failed"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let error = OAuthError::from_response(response).await;
+        bail!("Refresh rejected ({status}): {error}");
+    }
+    response.json().await.wrap_err("Invalid token response")
 }

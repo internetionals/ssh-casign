@@ -123,9 +123,11 @@ fn open_browser(url: &str) {
     let mut command = match std::env::var(BROWSER_ENV) {
         Ok(browser) if !browser.trim().is_empty() => std::process::Command::new(browser),
         _ if cfg!(target_os = "macos") => std::process::Command::new("open"),
+        // Not `cmd /C start`: cmd would treat the `&`s in the URL as command
+        // separators. The URL handler gets the URL as is.
         _ if cfg!(windows) => {
-            let mut command = std::process::Command::new("cmd");
-            command.args(["/C", "start", ""]);
+            let mut command = std::process::Command::new("rundll32.exe");
+            command.arg("url.dll,FileProtocolHandler");
             command
         }
         _ => std::process::Command::new("xdg-open"),

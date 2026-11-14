@@ -5,7 +5,7 @@
 //! Only what `login` needs is implemented, so the private key of an ephemeral
 //! login never has to be written to disk for `ssh-add`.
 
-use color_eyre::eyre::{bail, eyre, WrapErr};
+use color_eyre::eyre::{bail, WrapErr};
 use ssh_key::{private::Ed25519Keypair, public::KeyData, Certificate};
 use zeroize::Zeroizing;
 
@@ -70,25 +70,11 @@ impl Identity {
     }
 }
 
-/// Send one framed message to the agent at `$SSH_AUTH_SOCK` and return the
-/// reply body.
-#[cfg(unix)]
-fn roundtrip(message: &[u8]) -> Result<Vec<u8>> {
-    use std::io::{Read, Write};
-
-    let socket = std::env::var_os("SSH_AUTH_SOCK")
-        .filter(|socket| !socket.is_empty())
-        .ok_or_else(|| eyre!("No ssh-agent found: SSH_AUTH_SOCK is not set"))?;
-    let mut stream = std::os::unix::net::UnixStream::connect(&socket).wrap_err_with(|| {
-        format!(
-            "Failed to connect to ssh-agent at {}",
-            socket.to_string_lossy()
-        )
-    })?;
+/// Write one framed message and read the reply body.
+fn exchange(stream: &mut (impl std::io::Read + std::io::Write), message: &[u8]) -> Result<Vec<u8>> {
     stream
         .write_all(message)
         .wrap_err("Failed to talk to ssh-agent")?;
-
     let mut len = [0u8; 4];
     stream
         .read_exact(&mut len)
@@ -104,9 +90,51 @@ fn roundtrip(message: &[u8]) -> Result<Vec<u8>> {
     Ok(reply)
 }
 
-#[cfg(not(unix))]
+/// `$SSH_AUTH_SOCK`, if set and not empty.
+fn auth_sock() -> Option<std::ffi::OsString> {
+    std::env::var_os("SSH_AUTH_SOCK").filter(|socket| !socket.is_empty())
+}
+
+/// Send one message to the agent at the Unix socket `$SSH_AUTH_SOCK`.
+#[cfg(unix)]
+fn roundtrip(message: &[u8]) -> Result<Vec<u8>> {
+    let socket = auth_sock()
+        .ok_or_else(|| color_eyre::eyre::eyre!("No ssh-agent found: SSH_AUTH_SOCK is not set"))?;
+    let mut stream = std::os::unix::net::UnixStream::connect(&socket).wrap_err_with(|| {
+        format!(
+            "Failed to connect to ssh-agent at {}",
+            socket.to_string_lossy()
+        )
+    })?;
+    exchange(&mut stream, message)
+}
+
+/// Windows' OpenSSH agent listens on a named pipe, which can be opened like a
+/// file. `$SSH_AUTH_SOCK` may name another pipe.
+#[cfg(windows)]
+const WINDOWS_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+
+/// Send one message to the agent at the named pipe `$SSH_AUTH_SOCK`, or
+/// OpenSSH's default pipe.
+#[cfg(windows)]
+fn roundtrip(message: &[u8]) -> Result<Vec<u8>> {
+    let pipe = auth_sock().unwrap_or_else(|| WINDOWS_AGENT_PIPE.into());
+    let mut stream = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&pipe)
+        .wrap_err_with(|| {
+            format!(
+                "Failed to connect to ssh-agent at {} (is the ssh-agent service running?)",
+                pipe.to_string_lossy()
+            )
+        })?;
+    exchange(&mut stream, message)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn roundtrip(_message: &[u8]) -> Result<Vec<u8>> {
-    bail!("ssh-agent is only supported on Unix-like systems")
+    bail!("ssh-agent is not supported on this platform")
 }
 
 /// Add the key with its certificate to the agent; the agent forgets both

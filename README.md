@@ -167,6 +167,7 @@ Client
 
 ```text
 ssh-casign-client [OPTIONS] login [-k KEY] [--new] [--min-remaining DURATION] [REQUEST OPTIONS]
+ssh-casign-client [OPTIONS] logout [--keep-agent]
 ssh-casign-client [OPTIONS] cert [-t user|host] [-o FILE] [REQUEST OPTIONS] [PUBLIC_KEY_FILE]
 ```
 
@@ -207,7 +208,36 @@ Reusing certificate in ssh-agent
 added earlier for the same application name, so the agent doesn't collect keys (servers
 give up after `MaxAuthTries` attempts).
 
+`logout` forgets the cached sign-in (see below) and removes the keys `login` added to
+the agent for this service; `--keep-agent` only forgets the sign-in.
+
 `cert` only requests a certificate for a public key and writes it out.
+
+### Staying signed in
+
+When the IdP returns a refresh token, the client stores it, and the next `cert` or
+`login` that needs a new certificate uses it instead of the browser or device flow.
+Rotated refresh tokens replace the stored one. If the IdP rejects the refresh token, or
+the service rejects the refreshed token, the client forgets it and signs in normally.
+
+Most IdPs only issue refresh tokens for the `offline_access` scope; add it to
+`oidc_provider.scopes` in the service config (or `scopes` in a client profile).
+
+| `token_store` | Where                                                                                                          |
+|---------------|----------------------------------------------------------------------------------------------------------------|
+| `keyring`     | OS credential store: macOS Keychain, Windows Credential Manager, Linux kernel keyring (until logout or reboot) |
+| `file`        | `refresh-tokens.json` in the cache directory, readable only by the user                                        |
+| `none`        | not stored; every new certificate needs a sign-in                                                              |
+
+Tokens are stored per IdP issuer and client ID, so profiles on the same IdP share the
+sign-in. Set `token_store` at the top of the client config or per profile.
+
+### Platforms
+
+The client runs on Linux, macOS and Windows. On Windows, `login` talks to the OpenSSH
+agent's named pipe (`\\.\pipe\openssh-ssh-agent`, or the pipe in `SSH_AUTH_SOCK`), and the
+browser is opened through the shell's URL handler. TLS uses each platform's own TLS
+stack and certificate store, so internal CAs that the OS trusts work.
 
 Request options; anything not requested falls back to the token's and then the
 profile's defaults:
@@ -225,14 +255,16 @@ profile's defaults:
 
 Global options:
 
-| Option              | Environment          | Meaning                                       |
-|---------------------|----------------------|-----------------------------------------------|
-| `-f, --config-file` | `SSH_CASIGN_CONFIG`  | Config file                                   |
-| `-p, --profile`     | `SSH_CASIGN_PROFILE` | Profile from the config file                  |
-| `-u, --url`         | `SSH_CASIGN_URL`     | Service base URL; overrides the profile's URL |
-| `--sign-in`         | `SSH_CASIGN_SIGN_IN` | `device` or `authorization-code` (`browser`)  |
-|                     | `SSH_CASIGN_TOKEN`   | Use this bearer token, skip sign-in (testing) |
-|                     | `RUST_LOG`           | Log verbosity (default `warn`)                |
+| Option              | Environment              | Meaning                                       |
+|---------------------|--------------------------|-----------------------------------------------|
+| `-f, --config-file` | `SSH_CASIGN_CONFIG`      | Config file                                   |
+| `-p, --profile`     | `SSH_CASIGN_PROFILE`     | Profile from the config file                  |
+| `-u, --url`         | `SSH_CASIGN_URL`         | Service base URL; overrides the profile's URL |
+| `--sign-in`         | `SSH_CASIGN_SIGN_IN`     | `device` or `authorization-code` (`browser`)  |
+| `--token-store`     | `SSH_CASIGN_TOKEN_STORE` | `keyring` (default), `file` or `none`         |
+|                     | `SSH_CASIGN_CACHE_DIR`   | Directory for the `file` token store          |
+|                     | `SSH_CASIGN_TOKEN`       | Use this bearer token, skip sign-in (testing) |
+|                     | `RUST_LOG`               | Log verbosity (default `warn`)                |
 
 `cert` reads the public key from `PUBLIC_KEY_FILE`, or from stdin when that is omitted or
 `-`. It writes the certificate to `-o FILE`. Without `-o`, it follows OpenSSH's naming
@@ -249,6 +281,7 @@ The default config file is `<config dir>/ssh-casign-client/config.toml`. On macO
 default_profile = "default"    # default
 sign_in = "device"             # default for all profiles; "device" if omitted
 app_name = "laptop"            # default for all profiles; "ssh-casign-client" if omitted
+token_store = "keyring"        # where refresh tokens are kept: keyring, file or none
 
 [profiles.default]
 url = "https://ssh-ca.example.com/"

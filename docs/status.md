@@ -45,7 +45,8 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Device authorization flow              |  ✅   | RFC 8628; tested against Dex                             |
 | Authorization code flow + PKCE         |  ✅   | loopback redirect on `localhost`; tested against Dex     |
 | Token from environment                 |  ✅   | `SSH_CASIGN_TOKEN`, for testing and automation           |
-| Token caching / refresh                |  ❌   |                                                          |
+| Token caching / refresh                |  ✅   | refresh tokens in keyring/file; `logout` forgets them    |
+| Platforms                              |  ✅   | Linux (tests in a container), macOS, Windows (compiles)  |
 | Sign request with bearer token         |  ✅   | error details from body or `WWW-Authenticate`            |
 | Request certificate values             |  ✅   | validity, principals, extensions, app name, ...          |
 | Add key + certificate to `ssh-agent`   |  ✅   | `login`: in-memory key, or existing key via `ssh-add`    |
@@ -103,8 +104,7 @@ client can pick a working default.
   (with `aud = client_id`) is the most portable choice. A JWT access token with a
   dedicated audience is the cleaner choice where the IdP supports it. Either way, the
   service checks the audience.
-- Cache the refresh token in the OS keychain (the `keyring` crate). A renewal then needs
-  no browser round trip.
+- Refresh tokens are cached (done; `token_store` in the client config).
 - Non-interactive use (CI, host enrollment) could get a separate `client_credentials`
   mode with its own config. For now, `SSH_CASIGN_TOKEN` covers testing.
 
@@ -127,12 +127,15 @@ values, for example a `comment` template, or `matching_*` patterns built from cl
 
 - `login` is done: in-memory key or existing key, lifetime equal to the certificate, and
   reuse of a still-valid certificate from the same service and application name.
-- Next: cache the refresh token, so getting a new certificate needs no browser or device
-  code while the IdP session lasts.
+- Refresh tokens are cached (keyring, file or none), so a new certificate needs no
+  browser or device code while the IdP session lasts.
 - Reuse doesn't look at *who* the certificate is for: on a shared agent, a second user
   running `login` would get the first user's certificate. An agent is normally personal,
   but `login` could check the principals or key ID once it knows the identity.
-- `ssh-agent` on Windows (named pipe) is not supported yet.
+- Windows support (named-pipe agent, URL handler for the browser) compiles but hasn't
+  been run on Windows yet. On Linux, the `keyring` store uses the kernel keyring, which
+  doesn't survive a reboot; a Secret Service backend (GNOME Keyring, KWallet) would, but
+  needs D-Bus.
 
 ### Service operations
 

@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use url::Url;
 
+pub use crate::token_store::TokenStore;
+
 /// How the client signs the user in at the OpenID Connect provider.
 #[derive(clap::ValueEnum, Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -32,6 +34,8 @@ pub struct Profile {
     pub scopes: Option<Vec<String>>,
     /// Application name for this profile; overrides the top-level `app_name`.
     pub app_name: Option<String>,
+    /// Refresh token storage for this profile; overrides the top-level one.
+    pub token_store: Option<TokenStore>,
 }
 
 fn default_profile() -> String {
@@ -53,6 +57,10 @@ pub struct Config {
 
     /// Default application name (part of the certificate's key ID).
     pub app_name: Option<String>,
+
+    /// Where refresh tokens are stored (default: the OS credential store).
+    #[serde(default)]
+    pub token_store: TokenStore,
 }
 
 impl Default for Config {
@@ -62,6 +70,7 @@ impl Default for Config {
             default_profile: default_profile(),
             sign_in: SignInMethod::default(),
             app_name: None,
+            token_store: TokenStore::default(),
         }
     }
 }
