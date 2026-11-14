@@ -12,6 +12,7 @@ pub(super) struct AppState {
     pub(super) authorities: SshCaProviders,
     /// Pre-serialized discovery document (it only depends on the config).
     pub(super) discovery_document: String,
+    pub(super) audit: Option<Arc<crate::audit::AuditLog>>,
 }
 
 impl AppState {
@@ -21,12 +22,20 @@ impl AppState {
         let authorities = config.authorities.load()?;
         let oidc_validator = config.oidc_provider.get_validator().await?;
         let discovery_document = super::discovery::document(&config, &authorities)?;
+        let audit = match &config.audit {
+            Some(audit) => Some(audit.open(&server_id)?),
+            None => {
+                tracing::warn!("no [audit] configured: issued certificates are only in this log");
+                None
+            }
+        };
         Ok(Arc::new(Self {
             config,
             server_id,
             oidc_validator,
             authorities,
             discovery_document,
+            audit,
         }))
     }
 }

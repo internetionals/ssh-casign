@@ -32,6 +32,12 @@ pub(crate) async fn sign(
         .wrap_err_with(|| format!("Sign request to {sign_endpoint} failed"))?;
 
     let status = response.status();
+    let request_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(|id| format!(" [request ID {id}]"))
+        .unwrap_or_default();
     if !status.is_success() {
         let challenge = response
             .headers()
@@ -49,7 +55,7 @@ pub(crate) async fn sign(
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(Unauthorized(detail).into());
         }
-        bail!("Sign request rejected ({status}): {detail}");
+        bail!("Sign request rejected ({status}): {detail}{request_id}");
     }
 
     let response: SignedKeyResponse = response.json().await.wrap_err("Invalid sign response")?;

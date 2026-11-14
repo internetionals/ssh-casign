@@ -25,7 +25,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | User certificates                      |  ✅   |                                                          |
 | Host certificates                      |  ❌   | refused with 501 until a trust model is designed         |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
-| Audit log                              |  🟡   | `info` log line per issued certificate                   |
+| Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |
 | Serial numbers                         |  ✅   | random non-zero 64-bit; `{{serial}}` in key ID templates |
 | Config path, listen address            |  ✅   | argument or `SSH_CASIGN_CONFIG`; `listen` in config      |
 | Strict config parsing                  |  ✅   | unknown keys are an error                                |
@@ -76,8 +76,9 @@ Policy defaults and limits were added on 2026-11-14 (see [policy.md](policy.md))
 
 Still open, ordered by impact:
 
-1. **The audit log is a plain log line**; a durable, structured audit store and a KRL
-   (revocation list) built from it are still to do.
+1. **No revocation yet.** The audit log has every certificate (and its serial), which is
+   what a KRL (key revocation list) generator needs; generating and distributing one is
+   still to do.
 2. **No proof that the token was meant for this service** when the IdP puts the
    `client_id` in `aud` for every token issued to that client. Use a dedicated client
    for ssh-casign, or configure a dedicated `audience`.
@@ -167,6 +168,11 @@ Suggested order of work
 3. ~~Shared proto crate + discovery endpoint.~~ Done.
 4. ~~Client: the device flow, then authorization code + PKCE.~~ Done.
 5. ~~`ssh-agent` integration and the `login` command.~~ Done.
-6. ~~Serials, claim templates for principals~~ (done), durable audit log, TLS,
+6. ~~Serials, claim templates for principals, durable audit log~~ (done), TLS,
    integration tests.
 7. Host certificates and additional CA providers.
+8. Serverless deployment (AWS Lambda, Azure Functions, Google Cloud Run functions): the
+   audit log already has a `stdout` sink for this. Still needed: listen address from the
+   platform's variable (`PORT`, `FUNCTIONS_CUSTOMHANDLER_PORT`), config from environment
+   or a secret store instead of a file, CA keys from a KMS or secret store instead of a
+   file, and on Lambda the Lambda Web Adapter (or the `lambda_http` crate).

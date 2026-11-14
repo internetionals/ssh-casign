@@ -17,6 +17,8 @@ pub(crate) struct Config {
     pub(crate) oidc_provider: crate::web::oidc::Config,
     pub(crate) profiles: crate::certificate::profiles::Profiles,
     pub(crate) authorities: crate::authority::Config,
+    /// Audit log; without it, issued certificates are only in the service log.
+    pub(crate) audit: Option<crate::audit::Config>,
 }
 
 impl Config {

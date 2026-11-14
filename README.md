@@ -117,7 +117,14 @@ The service builds the key ID from the profile's `key_id` template. The default 
 `{{server_id}}:{{profile}}:{{oidc_id}}:{{app_name}}`, for example
 `ca1:ops:alice@example.com:ansible`. It records which service instance issued the
 certificate, under which profile, for which IdP identity, and for which client workload.
-Each issued certificate is also logged. See [docs/policy.md](docs/policy.md#key-id).
+See [docs/policy.md](docs/policy.md#key-id).
+
+### Audit log
+
+Every issued certificate and every denied request of an authenticated client is
+recorded in Common Event Format (CEF), to a file, stdout (for AWS Lambda, Azure
+Functions, GCP), and/or syslog (local socket, TCP or UDP). A certificate is only
+returned once its record has been written. See [docs/audit.md](docs/audit.md).
 
 ### Configuration
 
@@ -160,7 +167,15 @@ required_extensions = ["permit-pty"]
 provider = "file"              # only provider so far: OpenSSH private key on disk
 private_key_file = "ssh-ca"
 cert_types = ["user"]          # "user" and/or "host"
+
+# Audit log (CEF), see docs/audit.md.
+[audit]
+[[audit.sink]]
+type = "file"
+path = "/var/log/ssh-casign/audit.cef"
 ```
+
+The service logs to stderr; stdout is reserved for the audit log's `stdout` sink.
 
 Client
 ------

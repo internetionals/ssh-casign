@@ -1,5 +1,6 @@
 use std::{path::PathBuf, process::ExitCode};
 
+mod audit;
 mod authority;
 mod certificate;
 mod config;
@@ -26,7 +27,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Logs go to stderr: stdout is reserved for the audit log's stdout sink.
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),

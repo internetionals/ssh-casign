@@ -21,6 +21,10 @@ pub(crate) async fn main(config: Config) -> Result<(), Box<dyn std::error::Error
         .await
         .map_err(|err| format!("failed to listen on {listen}: {err}"))?;
     tracing::info!("listening on {listen}");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
