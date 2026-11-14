@@ -10,9 +10,9 @@ together with the token to the signing service. The service validates the token,
 the token's claims to a certificate profile and returns a signed certificate. The client
 writes the certificate to disk or loads it into `ssh-agent`.
 
-> Status: experimental. Sign-in with the device flow and the authorization code
-> (browser) flow works end to end against Dex. `ssh-agent` support is not implemented
-> yet. See [docs/status.md](docs/status.md).
+> Status: experimental. Sign-in (device flow and browser), certificate issuance,
+> `ssh-agent` loading and `sshd` login work end to end against Dex. See
+> [docs/status.md](docs/status.md).
 
 Workspace layout
 ----------------
@@ -166,8 +166,28 @@ Client
 ------
 
 ```text
+ssh-casign-client [OPTIONS] login [-k KEY] [REQUEST OPTIONS]
 ssh-casign-client [OPTIONS] cert [-t user|host] [-o FILE] [REQUEST OPTIONS] [PUBLIC_KEY_FILE]
 ```
+
+`login` signs in and loads a certificate into `ssh-agent` (`$SSH_AUTH_SOCK`). The
+agent forgets the key when the certificate expires, so there is nothing to clean up:
+
+- Without `-k`, a new Ed25519 key is generated in memory and added to the agent with its
+  certificate. The private key never touches the disk.
+- With `-k ~/.ssh/id_ed25519`, the existing key is used: `id_ed25519.pub` is signed,
+  the certificate is written to `id_ed25519-cert.pub`, and `ssh-add -t <lifetime>` loads
+  both (and asks for the passphrase if the key has one).
+
+```sh
+$ ssh-casign-client login -I laptop
+Added certificate to ssh-agent
+  key ID:     ca1:default:alice@example.com:laptop
+  principals: alice
+  expires in: 1h00m
+```
+
+`cert` only requests a certificate for a public key and writes it out.
 
 Request options; anything not requested falls back to the token's and then the
 profile's defaults:
@@ -259,7 +279,11 @@ both with password `password`. The profile in `config-dex.toml` gives each user 
 own username as principal through a claim template.
 
 ```sh
-# terminal 1: Dex on :5557 (docker or podman)
+# all at once: Dex, service, login into a separate ssh-agent, and an ssh login
+# into a throwaway sshd on 127.0.0.1:2222 (needs cargo build --workspace first)
+poc/e2e-login.sh
+
+# or by hand; terminal 1: Dex on :5557 (docker or podman)
 poc/dex/run.sh
 
 # terminal 2: signing service on 127.0.0.1:3000

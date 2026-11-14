@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use url::Url;
 
 mod cert;
+mod login;
+mod request;
 
 use crate::config::{Config, SignInMethod};
 use crate::error::{Report, Result, WrapErr};
@@ -12,6 +14,8 @@ pub(crate) type CmdResult = Result<Option<String>>;
 enum Cmd {
     /// Sign in and request a certificate for a public key
     Cert(cert::Args),
+    /// Sign in and add a key with a fresh certificate to ssh-agent
+    Login(login::Args),
 }
 
 #[derive(Parser)]
@@ -81,6 +85,7 @@ pub(crate) fn run_with_config(args: &Args, config: &Config) -> CmdResult {
     let target = resolve_target(args, config)?;
     match &args.cmd {
         Cmd::Cert(cert_args) => cert::run(cert_args, &target),
+        Cmd::Login(login_args) => login::run(login_args, &target),
     }
 }
 

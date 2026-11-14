@@ -19,4 +19,5 @@ tokio = { version = "1.41.1", features = ["full"] }
 toml = "0.8.19"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+zeroize = "1.9.1"
 url = { version = "2.5.8", features = ["serde"] }

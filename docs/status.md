@@ -48,8 +48,8 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Token caching / refresh                |  ❌   |                                                          |
 | Sign request with bearer token         |  ✅   | error details from body or `WWW-Authenticate`            |
 | Request certificate values             |  ✅   | validity, principals, extensions, app name, ...          |
-| Add key + certificate to `ssh-agent`   |  ❌   |                                                          |
-| Generate a key pair                    |  ❌   |                                                          |
+| Add key + certificate to `ssh-agent`   |  ✅   | `login`: in-memory key, or existing key via `ssh-add`    |
+| Generate a key pair                    |  ✅   | ephemeral Ed25519 for `login`, never written to disk     |
 | Tests                                  |  🟡   | option precedence, certificate file naming               |
 
 ### PoC
@@ -60,6 +60,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | curl-based end-to-end script           |  ✅   |                                                          |
 | Client end to end                      |  ✅   | device flow with Dex; mock tokens via `SSH_CASIGN_TOKEN` |
 | IdP with device flow for testing       |  ✅   | `poc/dex/`, with `approve.sh` for browserless approval   |
+| End to end through `sshd`              |  ✅   | `poc/e2e-login.sh`: login, ssh, expiry, wrong principal  |
 
 Known issues
 ------------
@@ -123,13 +124,11 @@ values, for example a `comment` template, or `matching_*` patterns built from cl
 
 ### Client UX
 
-- `ssh-casign-client login` as a single command: authenticate, sign, and add to the
-  agent with a lifetime equal to the certificate validity (`ssh-add -t`, or the
-  `ssh-agent-lib` crate).
-- Optionally generate an ephemeral key in memory and load it only into the agent. No key
-  material ever touches the disk.
-- When writing to disk, use OpenSSH's naming convention (`id_ed25519` →
-  `id_ed25519-cert.pub`), so `ssh` picks up the certificate automatically.
+- `login` is done: in-memory key or existing key, lifetime equal to the certificate.
+- Next: reuse a still-valid certificate instead of signing in again (check the agent
+  for a certificate from the same service with enough validity left), and cache the
+  refresh token so renewal needs no browser or device code.
+- `ssh-agent` on Windows (named pipe) is not supported yet.
 
 ### Service operations
 
@@ -160,7 +159,7 @@ Suggested order of work
 2. ~~Audience/issuer validation, policy defaults and limits.~~ Done.
 3. ~~Shared proto crate + discovery endpoint.~~ Done.
 4. ~~Client: the device flow, then authorization code + PKCE.~~ Done.
-5. `ssh-agent` integration and the `login` command.
+5. ~~`ssh-agent` integration and the `login` command.~~ Done.
 6. ~~Serials, claim templates for principals~~ (done), durable audit log, TLS,
    integration tests.
 7. Host certificates and additional CA providers.

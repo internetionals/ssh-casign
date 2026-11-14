@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::ffi::OsString;
 
+pub(crate) mod agent;
 pub(crate) mod auth;
 pub(crate) mod cmd;
 pub(crate) mod config;
