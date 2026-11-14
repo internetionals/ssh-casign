@@ -52,7 +52,7 @@ pub(crate) enum SignError {
     #[error("tokio join error")]
     Join(#[from] tokio::task::JoinError),
 }
-pub trait Signer {
+pub(crate) trait Signer {
     async fn sign(self: Arc<Self>, options: &CertificateOptions) -> Result<Certificate, SignError>;
 }
 

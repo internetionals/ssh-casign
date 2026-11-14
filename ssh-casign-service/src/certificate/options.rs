@@ -110,7 +110,7 @@ impl<'a> CertificateOptions {
         self.extensions.clear();
     }
 
-    pub fn extensions(&'a self) -> impl Iterator<Item = (&str, &str)> {
+    pub fn extensions(&'a self) -> impl Iterator<Item = (&'a str, &'a str)> {
         self.extensions
             .iter()
             .map(|(k, v)| (k.as_ref(), v.as_ref()))
@@ -133,7 +133,7 @@ impl<'a> CertificateOptions {
         self.critical_options.clear();
     }
 
-    pub fn critical_options(&'a self) -> impl Iterator<Item = (&str, &str)> {
+    pub fn critical_options(&'a self) -> impl Iterator<Item = (&'a str, &'a str)> {
         self.critical_options
             .iter()
             .map(|(k, v)| (k.as_ref(), v.as_ref()))
