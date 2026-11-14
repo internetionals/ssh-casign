@@ -15,6 +15,12 @@
 //! request is rejected. A default is fitted to the limits where possible
 //! (ranges are clamped, disallowed set members are dropped); text defaults
 //! that violate a limit are an error. Required values are always added.
+//!
+//! Host certificates have no extensions or critical options (OpenSSH defines
+//! none for them): requesting any is rejected, and `required_extensions` and
+//! `required_critical_options` only apply to user certificates. Their
+//! principals are host names or addresses: lowercase (see
+//! [`Policy::for_host`]), without wildcards.
 
 use std::collections::BTreeMap;
 
@@ -54,6 +60,32 @@ fn rsa_bits(key: &ssh_key::public::RsaPublicKey) -> u32 {
         Some([first, rest @ ..]) => rest.len() as u32 * 8 + (8 - first.leading_zeros()),
         _ => 0,
     }
+}
+
+/// Longest host principal (a DNS name has at most 253 characters).
+const MAX_HOST_PRINCIPAL_LEN: usize = 253;
+
+/// A host principal is a host name or an IP address: lowercase letters,
+/// digits, `.`, `-`, `_` and `:` (IPv6). Wildcards (`*`, `?`) would let one
+/// certificate speak for many hosts and are refused.
+fn check_host_principal(principal: &str) -> Result<(), String> {
+    if principal.len() > MAX_HOST_PRINCIPAL_LEN {
+        return Err(format!(
+            "host principal is longer than {MAX_HOST_PRINCIPAL_LEN} characters"
+        ));
+    }
+    if let Some(c) = principal.chars().find(|c| {
+        !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '-' | '_' | ':'))
+    }) {
+        return Err(format!(
+            "host principal '{principal}' contains '{c}'; only host names and addresses \
+             (a-z, 0-9, '.', '-', '_', ':') are allowed"
+        ));
+    }
+    if principal.starts_with(['.', '-']) || principal.ends_with('.') {
+        return Err(format!("host principal '{principal}' is not a host name"));
+    }
+    Ok(())
 }
 
 /// Built-in limit on the client's application name.
@@ -130,6 +162,25 @@ pub(crate) struct Policy {
     /// Default comment.
     pub(crate) comment: Option<String>,
     pub(crate) matching_comment: Option<Pattern>,
+}
+
+impl Policy {
+    /// The policy for host certificates: principals lowercased, since `ssh`
+    /// compares host names in lowercase. (`matching_principals` patterns are
+    /// left as they are; write them for lowercase names.)
+    pub(crate) fn for_host(&self) -> Policy {
+        let lowercase = |names: &Option<Vec<String>>| {
+            names
+                .as_ref()
+                .map(|names| names.iter().map(|name| name.to_lowercase()).collect())
+        };
+        Policy {
+            principals: lowercase(&self.principals),
+            required_principals: lowercase(&self.required_principals),
+            allowed_principals: lowercase(&self.allowed_principals),
+            ..self.clone()
+        }
+    }
 }
 
 /// Values the client requested explicitly.
@@ -288,41 +339,25 @@ impl<'a> Policies<'a> {
     ) -> Result<Resolved, Error> {
         let validity = self.resolve_validity(request.validity)?;
 
-        let principals = self.resolve_principals(request.principals.as_ref())?;
+        let principals = self.resolve_principals(request.principals.as_ref(), cert_type)?;
 
-        let default_extensions = self
-            .token
-            .extensions
-            .clone()
-            .or_else(|| self.profile.extensions.clone())
-            .or_else(|| {
-                (cert_type == CertType::User).then(|| {
-                    DEFAULT_USER_EXTENSIONS
-                        .iter()
-                        .map(|name| (name.to_string(), String::new()))
-                        .collect()
-                })
-            });
-        let extensions = self.resolve_entries(
-            "extension",
-            request.extensions.as_ref(),
-            default_extensions.as_ref(),
-            |policy| names_to_entries(policy.required_extensions.as_ref()),
-            |name, _| self.check_extension(name),
-        )?;
-
-        let default_critical_options = self
-            .token
-            .critical_options
-            .as_ref()
-            .or(self.profile.critical_options.as_ref());
-        let critical_options = self.resolve_entries(
-            "critical option",
-            request.critical_options.as_ref(),
-            default_critical_options,
-            |policy| policy.required_critical_options.clone().unwrap_or_default(),
-            |name, value| self.check_critical_option(name, value),
-        )?;
+        let (extensions, critical_options) = match cert_type {
+            CertType::Host => {
+                for (kind, requested) in [
+                    ("extensions", &request.extensions),
+                    ("critical options", &request.critical_options),
+                ] {
+                    if requested
+                        .as_ref()
+                        .is_some_and(|entries| !entries.is_empty())
+                    {
+                        return Err(Error::Rejected(format!("host certificates have no {kind}")));
+                    }
+                }
+                (BTreeMap::new(), BTreeMap::new())
+            }
+            CertType::User => self.resolve_user_options(request)?,
+        };
 
         let app_name = self.resolve_text(
             "application name",
@@ -357,6 +392,48 @@ impl<'a> Policies<'a> {
             app_name,
             comment,
         })
+    }
+
+    /// Extensions and critical options of a user certificate.
+    #[allow(clippy::type_complexity)]
+    fn resolve_user_options(
+        &self,
+        request: &Request,
+    ) -> Result<(BTreeMap<String, String>, BTreeMap<String, String>), Error> {
+        let default_extensions = self
+            .token
+            .extensions
+            .clone()
+            .or_else(|| self.profile.extensions.clone())
+            .or_else(|| {
+                Some(
+                    DEFAULT_USER_EXTENSIONS
+                        .iter()
+                        .map(|name| (name.to_string(), String::new()))
+                        .collect(),
+                )
+            });
+        let extensions = self.resolve_entries(
+            "extension",
+            request.extensions.as_ref(),
+            default_extensions.as_ref(),
+            |policy| names_to_entries(policy.required_extensions.as_ref()),
+            |name, _| self.check_extension(name),
+        )?;
+
+        let default_critical_options = self
+            .token
+            .critical_options
+            .as_ref()
+            .or(self.profile.critical_options.as_ref());
+        let critical_options = self.resolve_entries(
+            "critical option",
+            request.critical_options.as_ref(),
+            default_critical_options,
+            |policy| policy.required_critical_options.clone().unwrap_or_default(),
+            |name, value| self.check_critical_option(name, value),
+        )?;
+        Ok((extensions, critical_options))
     }
 
     fn resolve_validity(&self, requested: Option<u64>) -> Result<u64, Error> {
@@ -404,7 +481,11 @@ impl<'a> Policies<'a> {
         Ok(default.clamp(min.0, max.0))
     }
 
-    fn resolve_principals(&self, requested: Option<&Vec<String>>) -> Result<Vec<String>, Error> {
+    fn resolve_principals(
+        &self,
+        requested: Option<&Vec<String>>,
+        cert_type: CertType,
+    ) -> Result<Vec<String>, Error> {
         // Fail closed: without any principal limits, the defaults are the only
         // thing standing between a client and e.g. `root`.
         let limited = self.sources().iter().any(|(_, policy)| {
@@ -429,7 +510,12 @@ impl<'a> Policies<'a> {
             requested.as_ref(),
             default.as_ref(),
             |policy| names_to_entries(policy.required_principals.as_ref()),
-            |name, _| self.check_principal(name),
+            |name, _| {
+                if cert_type == CertType::Host {
+                    check_host_principal(name)?;
+                }
+                self.check_principal(name)
+            },
         )?;
         if principals.is_empty() {
             return Err(Error::NoPrincipals);
@@ -658,6 +744,103 @@ mod tests {
 
     fn base() -> serde_json::Value {
         serde_json::json!({ "principals": ["alice"], "validity": 300 })
+    }
+
+    fn resolve_host(profile: serde_json::Value, request: Request) -> Result<Resolved, Error> {
+        Policies {
+            token: &Policy::default().for_host(),
+            profile: &policy(profile).for_host(),
+        }
+        .resolve(&request, CertType::Host)
+    }
+
+    fn host_profile() -> serde_json::Value {
+        serde_json::json!({
+            "validity": 2_592_000,
+            "matching_principals": "[a-z0-9-]+\\.prod\\.example\\.com",
+            "required_extensions": ["permit-pty"],
+            "required_critical_options": { "source-address": "10.0.0.0/8" },
+        })
+    }
+
+    fn request_principals(principals: &[&str]) -> Request {
+        Request {
+            principals: Some(principals.iter().map(|p| p.to_string()).collect()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn host_certificates_have_no_options() {
+        let resolved = resolve_host(
+            host_profile(),
+            request_principals(&["web-1.prod.example.com"]),
+        )
+        .unwrap();
+        assert_eq!(resolved.principals, ["web-1.prod.example.com"]);
+        assert_eq!(resolved.validity, 2_592_000);
+        // No default user extensions, and the user-only required ones are skipped.
+        assert!(resolved.extensions.is_empty());
+        assert!(resolved.critical_options.is_empty());
+        let with_extension = Request {
+            extensions: Some([("permit-pty".to_string(), String::new())].into()),
+            ..request_principals(&["web-1.prod.example.com"])
+        };
+        assert!(matches!(
+            resolve_host(host_profile(), with_extension),
+            Err(Error::Rejected(message)) if message.contains("no extensions")
+        ));
+        let with_option = Request {
+            critical_options: Some([("force-command".to_string(), "x".to_string())].into()),
+            ..request_principals(&["web-1.prod.example.com"])
+        };
+        assert!(resolve_host(host_profile(), with_option).is_err());
+        // Explicitly empty is fine.
+        let empty = Request {
+            extensions: Some(BTreeMap::new()),
+            ..request_principals(&["web-1.prod.example.com"])
+        };
+        assert!(resolve_host(host_profile(), empty).is_ok());
+    }
+
+    #[test]
+    fn host_principals_are_host_names() {
+        for bad in [
+            "*.prod.example.com",
+            "web?.prod.example.com",
+            "web 1.prod.example.com",
+            ".prod.example.com",
+            "Web-1.prod.example.com",
+        ] {
+            assert!(
+                matches!(
+                    resolve_host(host_profile(), request_principals(&[bad])),
+                    Err(Error::Rejected(_))
+                ),
+                "{bad}"
+            );
+        }
+        // Outside matching_principals.
+        assert!(resolve_host(host_profile(), request_principals(&["db.example.com"])).is_err());
+        // Requesting host names needs a limit, as for users.
+        assert!(matches!(
+            resolve_host(serde_json::json!({ "validity": 60 }), request_principals(&["a.example.com"])),
+            Err(Error::Rejected(message)) if message.contains("allowed_principals")
+        ));
+        let addresses = serde_json::json!({ "validity": 60, "allowed_principals": ["10.0.0.5", "2001:db8::5"] });
+        assert!(resolve_host(addresses, request_principals(&["10.0.0.5", "2001:db8::5"])).is_ok());
+    }
+
+    #[test]
+    fn host_principals_from_defaults_are_lowercased() {
+        // E.g. from a template over an upper-case VM name claim.
+        let profile = serde_json::json!({
+            "validity": 60,
+            "principals": ["WEB-1.Example.com", "bad name"],
+            "allowed_principals": ["WEB-1.example.COM"],
+        });
+        let resolved = resolve_host(profile, Request::default()).unwrap();
+        assert_eq!(resolved.principals, ["web-1.example.com"]);
     }
 
     // --- defaults: client → token → profile

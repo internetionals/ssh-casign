@@ -9,6 +9,10 @@
 //! | `{{serial}}`     | the certificate's serial number (decimal)                 |
 //! | `{{claim:NAME}}` | a claim of the token: string, number, boolean, or a list  |
 //!
+//! A claim name may be a path into nested claims, `a.b.c` (e.g.
+//! `google.compute_engine.instance_name`); a top-level claim with exactly that
+//! name (`https://example.com/roles`) takes precedence.
+//!
 //! Which placeholders a template may use depends on where it is used; that is
 //! checked when the template is parsed.
 
@@ -188,9 +192,23 @@ fn scalar(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+/// A claim by name: the top-level claim with exactly that name, else the
+/// dotted path into nested objects.
+pub(crate) fn claim<'a>(claims: &'a TokenClaims, name: &str) -> Option<&'a serde_json::Value> {
+    if let Some(value) = claims.get(name) {
+        return Some(value);
+    }
+    let mut parts = name.split('.');
+    let mut value = claims.get(parts.next()?)?;
+    for part in parts {
+        value = value.as_object()?.get(part)?;
+    }
+    Some(value)
+}
+
 /// Values of a claim: one for a scalar, one per element for a list.
 pub(crate) fn claim_values(claims: &TokenClaims, name: &str) -> Result<Vec<String>, Error> {
-    match claims.get(name) {
+    match claim(claims, name) {
         None | Some(serde_json::Value::Null) => Err(Error::MissingClaim(name.to_string())),
         Some(serde_json::Value::Array(values)) => values
             .iter()
@@ -220,6 +238,28 @@ fn escape_into(out: &mut String, value: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nested_claims() {
+        let claims: TokenClaims = serde_json::from_value(serde_json::json!({
+            "google": { "compute_engine": { "instance_name": "web-1", "project_id": "p" } },
+            "https://example.com/roles": ["ops"],
+            "a.b": "exact",
+            "a": { "b": "nested" },
+        }))
+        .unwrap();
+        assert_eq!(
+            claim_values(&claims, "google.compute_engine.instance_name").unwrap(),
+            ["web-1"]
+        );
+        assert_eq!(
+            claim_values(&claims, "https://example.com/roles").unwrap(),
+            ["ops"]
+        );
+        assert_eq!(claim_values(&claims, "a.b").unwrap(), ["exact"]);
+        assert!(claim_values(&claims, "google.compute_engine").is_err());
+        assert!(claim_values(&claims, "google.missing.x").is_err());
+    }
 
     fn claims(json: serde_json::Value) -> TokenClaims {
         serde_json::from_value(json).unwrap()

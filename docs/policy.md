@@ -18,6 +18,11 @@ User certificates get `ssh-keygen`'s default extensions when no source specifies
 extensions: `permit-X11-forwarding`, `permit-agent-forwarding`, `permit-port-forwarding`,
 `permit-pty` and `permit-user-rc`.
 
+Host certificates (profiles with `cert_types = ["host"]`) have no extensions or
+critical options, and their principals must be lowercase host names or addresses; see
+[hosts.md](hosts.md). Tokens from `[issuers.<name>]` only supply defaults and limits
+with `token_policy = true`.
+
 Limits
 ------
 

@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use ssh_casign_proto::CertType;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -23,6 +24,8 @@ pub(crate) const DEFAULT_PROFILE: &str = "default";
 pub(crate) struct CertificateSettings {
     /// Authorities to sign with, in order of preference.
     ssh_ca: Vec<Arc<str>>,
+    /// Certificate types this profile issues.
+    cert_types: Vec<CertType>,
     key_id: KeyIdTemplate,
     policy: Policy,
     principal_templates: PrincipalTemplates,
@@ -88,6 +91,8 @@ fn expand_principals(templates: &[Template], context: &Context<'_>) -> Vec<Strin
 #[derive(Deserialize)]
 struct RawCertificateSettings {
     ssh_ca: OneOrMany,
+    /// Default `["user"]`.
+    cert_types: Option<Vec<CertType>>,
     #[serde(default)]
     key_id: KeyIdTemplate,
     #[serde(flatten)]
@@ -115,6 +120,10 @@ impl TryFrom<RawCertificateSettings> for CertificateSettings {
             }
             OneOrMany::Many(names) => names,
         };
+        let cert_types = raw.cert_types.unwrap_or_else(|| vec![CertType::User]);
+        if cert_types.is_empty() {
+            return Err("cert_types must name at least one certificate type".to_string());
+        }
         if !raw.unknown.is_empty() {
             let keys: Vec<_> = raw.unknown.keys().map(String::as_str).collect();
             return Err(format!("unknown profile setting(s): {}", keys.join(", ")));
@@ -132,6 +141,7 @@ impl TryFrom<RawCertificateSettings> for CertificateSettings {
         };
         Ok(Self {
             ssh_ca,
+            cert_types,
             key_id: raw.key_id,
             policy: raw.policy,
             principal_templates,
@@ -143,6 +153,10 @@ impl CertificateSettings {
     /// Authorities to sign with, in order of preference.
     pub(crate) fn authorities(&self) -> &[Arc<str>] {
         &self.ssh_ca
+    }
+
+    pub(crate) fn cert_types(&self) -> &[CertType] {
+        &self.cert_types
     }
 
     pub(crate) fn key_id(&self) -> &KeyIdTemplate {
@@ -178,6 +192,9 @@ impl CertificateSettings {
 struct RawProfileSelector {
     /// Profile name, used in the key ID; defaults to `<claim>=<value>`.
     name: Option<String>,
+    /// The issuer whose tokens this selector matches: a name from
+    /// `[issuers]`; default `oidc_provider`.
+    issuer: Option<String>,
     claim: String,
     value: String,
     settings: CertificateSettings,
@@ -185,6 +202,7 @@ struct RawProfileSelector {
 
 pub(crate) struct ProfileSelector {
     name: String,
+    issuer: String,
     claim: String,
     value: String,
     settings: CertificateSettings,
@@ -222,6 +240,9 @@ impl TryFrom<RawProfiles> for Profiles {
                 }
                 Ok(ProfileSelector {
                     name,
+                    issuer: selector
+                        .issuer
+                        .unwrap_or_else(|| crate::web::oidc::PRIMARY_ISSUER.to_string()),
                     claim: selector.claim,
                     value: selector.value,
                     settings: selector.settings,
@@ -242,8 +263,11 @@ pub(crate) struct Profile<'a> {
 }
 
 impl ProfileSelector {
-    fn matches(&self, claims: &TokenClaims) -> bool {
-        match claims.get(self.claim.as_str()) {
+    fn matches(&self, issuer: &str, claims: &TokenClaims) -> bool {
+        if self.issuer != issuer {
+            return false;
+        }
+        match super::template::claim(claims, &self.claim) {
             Some(serde_json::Value::String(value)) => *value == self.value,
             Some(serde_json::Value::Array(values)) => values
                 .iter()
@@ -267,27 +291,89 @@ impl Profiles {
             )
     }
 
-    /// First profile whose selector matches the claims, else the default.
-    pub(crate) fn lookup(&self, claims: &TokenClaims) -> Option<Profile<'_>> {
+    /// The first profile whose selector matches the token's issuer and
+    /// claims and that issues `cert_type`; else the default profile, which
+    /// only applies to tokens of `[oidc_provider]`.
+    pub(crate) fn lookup(
+        &self,
+        issuer: &str,
+        claims: &TokenClaims,
+        cert_type: CertType,
+    ) -> Option<Profile<'_>> {
+        let issues = |settings: &CertificateSettings| settings.cert_types.contains(&cert_type);
         self.map
             .iter()
-            .find(|selector| selector.matches(claims))
+            .find(|selector| selector.matches(issuer, claims) && issues(&selector.settings))
             .map(|selector| Profile {
                 name: &selector.name,
                 settings: &selector.settings,
             })
             .or_else(|| {
-                self.default.as_ref().map(|settings| Profile {
-                    name: DEFAULT_PROFILE,
-                    settings,
-                })
+                self.default
+                    .as_ref()
+                    .filter(|settings| {
+                        issuer == crate::web::oidc::PRIMARY_ISSUER && issues(settings)
+                    })
+                    .map(|settings| Profile {
+                        name: DEFAULT_PROFILE,
+                        settings,
+                    })
             })
+    }
+
+    /// Check the profiles against the issuers and authorities: selectors
+    /// name known issuers, profiles name known authorities, and each
+    /// certificate type a profile issues has an authority that signs it.
+    pub(crate) fn check(
+        &self,
+        issuers: &crate::web::oidc::Issuers,
+        authorities: &ssh_casign_ca::Authorities,
+    ) -> Result<(), String> {
+        for selector in &self.map {
+            if !issuers.contains(&selector.issuer) {
+                return Err(format!(
+                    "profile {}: unknown issuer '{}' (configure [issuers.{}])",
+                    selector.name, selector.issuer, selector.issuer
+                ));
+            }
+        }
+        for (profile, settings) in self.all() {
+            for name in settings.authorities() {
+                if !authorities.contains_key(name) {
+                    return Err(format!("profile {profile}: unknown authority '{name}'"));
+                }
+            }
+            for cert_type in settings.cert_types() {
+                let signed = settings.authorities().iter().any(|name| {
+                    authorities
+                        .get(name)
+                        .is_some_and(|authority| authority.cert_types().contains(cert_type))
+                });
+                if !signed {
+                    return Err(format!(
+                        "profile {profile}: issues {} certificates, but none of its \
+                         authorities signs them (set cert_types on an authority)",
+                        cert_type_name(*cert_type)
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `user` or `host`, for messages.
+pub(crate) fn cert_type_name(cert_type: CertType) -> &'static str {
+    match cert_type {
+        CertType::User => "user",
+        CertType::Host => "host",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::oidc::PRIMARY_ISSUER as PRIMARY;
 
     fn profiles() -> Profiles {
         toml::from_str(
@@ -316,15 +402,30 @@ mod tests {
         let as_array = claims(serde_json::json!({ "roles": ["dev", "ops"] }));
         let other = claims(serde_json::json!({ "roles": ["dev"] }));
         assert_eq!(
-            profiles.lookup(&as_string).unwrap().settings.authorities()[0].as_ref(),
+            profiles
+                .lookup(PRIMARY, &as_string, CertType::User)
+                .unwrap()
+                .settings
+                .authorities()[0]
+                .as_ref(),
             "ops"
         );
         assert_eq!(
-            profiles.lookup(&as_array).unwrap().settings.authorities()[0].as_ref(),
+            profiles
+                .lookup(PRIMARY, &as_array, CertType::User)
+                .unwrap()
+                .settings
+                .authorities()[0]
+                .as_ref(),
             "ops"
         );
         assert_eq!(
-            profiles.lookup(&other).unwrap().settings.authorities()[0].as_ref(),
+            profiles
+                .lookup(PRIMARY, &other, CertType::User)
+                .unwrap()
+                .settings
+                .authorities()[0]
+                .as_ref(),
             "default"
         );
     }
@@ -333,13 +434,86 @@ mod tests {
     fn policy_is_parsed_from_profile() {
         let profiles = profiles();
         let ops = profiles
-            .lookup(&claims(serde_json::json!({ "roles": "ops" })))
+            .lookup(
+                PRIMARY,
+                &claims(serde_json::json!({ "roles": "ops" })),
+                CertType::User,
+            )
             .unwrap();
         assert_eq!(ops.name, "roles=ops");
         assert_eq!(ops.settings.policy().max_validity, Some(3600));
         assert!(ops.settings.policy().matching_principals.is_some());
-        let default = profiles.lookup(&claims(serde_json::json!({}))).unwrap();
+        let default = profiles
+            .lookup(PRIMARY, &claims(serde_json::json!({})), CertType::User)
+            .unwrap();
         assert_eq!(default.name, DEFAULT_PROFILE);
+    }
+
+    #[test]
+    fn lookup_by_issuer_and_cert_type() {
+        let profiles: Profiles = toml::from_str(
+            r#"
+            [default]
+            ssh_ca = "user-ca"
+
+            [[map]]
+            name = "admin-hosts"
+            claim = "roles"
+            value = "ssh-admin"
+            settings = { ssh_ca = "host-ca", cert_types = ["host"] }
+
+            [[map]]
+            name = "admins"
+            claim = "roles"
+            value = "ssh-admin"
+            settings = { ssh_ca = "user-ca", cert_types = ["user"] }
+
+            [[map]]
+            name = "gce"
+            issuer = "google"
+            claim = "google.compute_engine.project_id"
+            value = "prod"
+            settings = { ssh_ca = "host-ca", cert_types = ["host"] }
+            "#,
+        )
+        .unwrap();
+        let name = |issuer, claims: serde_json::Value, cert_type| {
+            profiles
+                .lookup(issuer, &self::claims(claims), cert_type)
+                .map(|profile| profile.name.to_string())
+        };
+        let admin = serde_json::json!({ "roles": ["ssh-admin"] });
+        assert_eq!(
+            name(PRIMARY, admin.clone(), CertType::Host).unwrap(),
+            "admin-hosts"
+        );
+        assert_eq!(
+            name(PRIMARY, admin.clone(), CertType::User).unwrap(),
+            "admins"
+        );
+        // Only the user default for others; it doesn't issue host certificates.
+        assert_eq!(
+            name(PRIMARY, serde_json::json!({}), CertType::User).unwrap(),
+            "default"
+        );
+        assert!(name(PRIMARY, serde_json::json!({}), CertType::Host).is_none());
+        // Another issuer's tokens only match its own selectors, never the default.
+        let gce = serde_json::json!({ "google": { "compute_engine": { "project_id": "prod" } } });
+        assert_eq!(name("google", gce.clone(), CertType::Host).unwrap(), "gce");
+        assert!(name("google", gce.clone(), CertType::User).is_none());
+        assert!(name(PRIMARY, gce, CertType::Host).is_none());
+        assert!(name("google", admin, CertType::User).is_none());
+    }
+
+    #[test]
+    fn cert_types_must_not_be_empty() {
+        assert!(
+            toml::from_str::<Profiles>("[default]\nssh_ca = \"a\"\ncert_types = []\n").is_err()
+        );
+        assert!(toml::from_str::<Profiles>(
+            "[default]\nssh_ca = \"a\"\ncert_types = [\"router\"]\n"
+        )
+        .is_err());
     }
 
     #[test]
@@ -397,7 +571,10 @@ mod tests {
         .unwrap();
         let claims =
             claims(serde_json::json!({ "preferred_username": "alice", "groups": ["dev", "ops"] }));
-        let settings = profiles.lookup(&claims).unwrap().settings;
+        let settings = profiles
+            .lookup(PRIMARY, &claims, CertType::User)
+            .unwrap()
+            .settings;
         let policy = settings.policy_for(&context(&claims));
         assert_eq!(
             policy.principals.unwrap(),
@@ -421,7 +598,10 @@ mod tests {
         )
         .unwrap();
         let claims = claims(serde_json::json!({ "preferred_username": "alice smith" }));
-        let settings = profiles.lookup(&claims).unwrap().settings;
+        let settings = profiles
+            .lookup(PRIMARY, &claims, CertType::User)
+            .unwrap()
+            .settings;
         assert_eq!(
             settings.policy_for(&context(&claims)).principals.unwrap(),
             Vec::<String>::new()

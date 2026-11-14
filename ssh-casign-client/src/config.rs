@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use serde::Deserialize;
 use url::Url;
@@ -18,6 +18,25 @@ pub enum SignInMethod {
     #[value(alias = "browser")]
     #[serde(alias = "browser")]
     AuthorizationCode,
+    /// OAuth 2.0 client credentials grant, for a confidential machine client
+    /// (`client_id`, `client_secret_file`).
+    ClientCredentials,
+    /// A token read from `token_file` (e.g. a Kubernetes projected service
+    /// account token).
+    TokenFile,
+    /// The GCE/GKE metadata server's identity token for `audience`.
+    GcpMetadata,
+    /// The Azure managed identity's token for `audience`.
+    AzureManagedIdentity,
+    /// The GitHub Actions OIDC token for `audience`.
+    GithubActions,
+}
+
+impl SignInMethod {
+    /// Signs in without a person, and without refresh tokens to cache.
+    pub fn is_machine(self) -> bool {
+        !matches!(self, Self::Device | Self::AuthorizationCode)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,8 +47,22 @@ pub struct Profile {
     pub url: Url,
     /// Sign-in method for this profile; overrides the top-level `sign_in`.
     pub sign_in: Option<SignInMethod>,
-    /// Overrides the client ID published by the service.
+    /// Overrides the client ID published by the service. For
+    /// `client-credentials` the confidential client; for
+    /// `azure-managed-identity` a user-assigned identity.
     pub client_id: Option<String>,
+    /// Issuer to sign in at, instead of the one the service publishes (for
+    /// `client-credentials` at another IdP).
+    pub issuer: Option<String>,
+    /// File with the client secret for `client-credentials`
+    /// (`SSH_CASIGN_CLIENT_SECRET` overrides it).
+    pub client_secret_file: Option<PathBuf>,
+    /// Audience to request machine tokens for (`gcp-metadata`,
+    /// `azure-managed-identity`, `github-actions`, optionally
+    /// `client-credentials`).
+    pub audience: Option<String>,
+    /// Token file for `token-file`.
+    pub token_file: Option<PathBuf>,
     /// Overrides the scopes published by the service.
     pub scopes: Option<Vec<String>>,
     /// Application name for this profile; overrides the top-level `app_name`.

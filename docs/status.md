@@ -14,9 +14,10 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 |----------------------------------------|:-----:|----------------------------------------------------------|
 | HTTP endpoint `POST /sign`             |  ✅   | axum, JSON in/out, JSON error bodies                     |
 | Discovery endpoint                     |  ✅   | issuer, client ID, scopes, sign endpoint, CA public keys |
-| Bearer token extraction                |  ✅   | `Claims<T>` extractor, 401 + `WWW-Authenticate`          |
+| Bearer token extraction                |  ✅   | `Authenticated` extractor, 401 + `WWW-Authenticate`      |
+| Several issuers                        |  ✅   | `[issuers.<name>]` for machines; routed by `iss`         |
 | JWT validation                         |  ✅   | signature (JWKS), `exp`, `nbf`; `iss` and `aud` required |
-| Claims → profile selection             |  🟡   | one `claim == value` per selector; first match wins      |
+| Claims → profile selection             |  🟡   | issuer, cert type, one `claim == value`; first match     |
 | Certificate policy (defaults + limits) |  ✅   | request → token → profile; both limit; docs/policy.md    |
 | Default user extensions                |  ✅   | ssh-keygen's defaults when no extensions are configured  |
 | CA key backends                        |  ✅   | file, pkcs11, vault, Azure, AWS, GCP                     |
@@ -28,7 +29,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | AWS Lambda                             |  ✅   | image with Lambda Web Adapter in deploy/aws-lambda       |
 | Google Cloud Run                       |  ✅   | distroless image in deploy/gcp-cloud-run                 |
 | User certificates                      |  ✅   |                                                          |
-| Host certificates                      |  ❌   | refused with 501 until a trust model is designed         |
+| Host certificates                      |  ✅   | machine, admin and orchestrator routes (docs/hosts.md)   |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
 | Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |
 | Behind proxies and CDNs                |  ✅   | `trusted_proxies`, XFF/RFC 7239/CF headers, `CF-Ray`     |
@@ -127,8 +128,11 @@ client can pick a working default.
   dedicated audience is the cleaner choice where the IdP supports it. Either way, the
   service checks the audience.
 - Refresh tokens are cached (done; `token_store` in the client config).
-- Non-interactive use (CI, host enrollment) could get a separate `client_credentials`
-  mode with its own config. For now, `SSH_CASIGN_TOKEN` covers testing.
+- Non-interactive sign-in is done: `client-credentials`, `token-file`, `gcp-metadata`,
+  `azure-managed-identity` and `github-actions` (docs/hosts.md). The last three haven't
+  run on their platforms yet.
+- Profile selectors match one claim. Several claims at once (GitHub's `repository` and
+  `ref`, say) would make machine profiles tighter; for now `sub` often combines them.
 
 ### Claim mapping (done for principals)
 
@@ -167,9 +171,6 @@ values, for example a `comment` template, or `matching_*` patterns built from cl
   behind a TLS proxy.
 - `GET /healthz` and request IDs in tracing spans. Rate limiting on `/sign` is left to
   a proxy or CDN in front (docs/audit.md, "Behind a reverse proxy or CDN").
-- Host certificates need a different trust model than user OIDC logins: for example
-  machine identity, the client credentials grant with a per-host client, or an
-  administrator approving the request. Design this separately before building it.
 
 ### Code
 
@@ -192,8 +193,8 @@ Suggested order of work
 5. ~~`ssh-agent` integration and the `login` command.~~ Done.
 6. ~~Serials, claim templates for principals, durable audit log~~ (done), TLS,
    integration tests.
-7. Host certificates (all CA backends are done: file, PKCS#11, Vault, Azure Key Vault,
-   AWS KMS, GCP KMS).
+7. ~~Host certificates~~ (done: machines, administrators and orchestrators; all CA
+   backends are done too). Still to do: a host-key revocation story (KRL).
 8. ~~Serverless deployment per platform, each with its cloud KMS~~ (done: Azure
    Functions, AWS Lambda, Google Cloud Run). Still to do: tests against the real cloud
    services, and workload identity federation for GCP.

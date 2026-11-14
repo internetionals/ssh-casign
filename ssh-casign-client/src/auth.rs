@@ -6,6 +6,7 @@ use crate::{config::SignInMethod, error::Result, token_store::StoredToken};
 
 mod authorization_code;
 mod device;
+pub(crate) mod machine;
 
 /// Environment variable with a ready-made bearer token. Skips the sign-in
 /// flow; meant for testing and automation.
@@ -51,6 +52,8 @@ pub(crate) struct SignInRequest<'a> {
     pub(crate) issuer: &'a str,
     pub(crate) client_id: &'a str,
     pub(crate) scopes: &'a [String],
+    /// For the machine methods.
+    pub(crate) machine: machine::MachineSettings<'a>,
 }
 
 /// Successful token endpoint response.
@@ -105,6 +108,8 @@ pub(crate) enum TokenSource {
     Refreshed,
     /// Through the interactive sign-in flow.
     Interactive,
+    /// A machine or workload token (no person, nothing cached).
+    Machine,
 }
 
 /// Sign the user in and return the bearer token for the service.
@@ -120,6 +125,24 @@ pub(crate) async fn sign_in(
     if let Ok(token) = std::env::var(TOKEN_ENV) {
         tracing::debug!("using token from {TOKEN_ENV}");
         return Ok((token, TokenSource::Environment));
+    }
+
+    if request.method.is_machine() {
+        let settings = &request.machine;
+        let token = match request.method {
+            SignInMethod::ClientCredentials => {
+                let provider = ProviderMetadata::discover(http, settings.issuer).await?;
+                machine::client_credentials(http, &provider.token_endpoint, settings).await?
+            }
+            SignInMethod::TokenFile => machine::token_file(settings)?,
+            SignInMethod::GcpMetadata => machine::gcp_metadata(http, settings).await?,
+            SignInMethod::AzureManagedIdentity => {
+                machine::azure_managed_identity(http, settings).await?
+            }
+            SignInMethod::GithubActions => machine::github_actions(http, settings).await?,
+            SignInMethod::Device | SignInMethod::AuthorizationCode => unreachable!(),
+        };
+        return Ok((token, TokenSource::Machine));
     }
 
     let provider = ProviderMetadata::discover(http, request.issuer).await?;
@@ -189,6 +212,7 @@ pub(crate) async fn sign_in(
             )
             .await?
         }
+        _ => unreachable!("machine methods are handled above"),
     };
     if token.refresh_token.is_none() {
         tracing::debug!(

@@ -104,7 +104,6 @@ Response on success (`200`):
 |    401 | Token missing or invalid (`WWW-Authenticate: Bearer error=...`)         |
 |    403 | No profile matched, request outside the policy limits, or no principals |
 |    500 | CA from the profile is not configured, or signing failed                |
-|    501 | Host certificate requested (not supported yet)                          |
 
 Error bodies are `{ "error": "<message>" }`. A 401 has no body; the reason is in the
 `WWW-Authenticate` header.
@@ -115,6 +114,20 @@ The token must be a JWT signed by a key in the IdP's JWKS. It must contain `exp`
 and `aud`. `iss` must equal `oidc_provider.issuer`, and `aud` must contain one of
 `oidc_provider.audience` (default: the `client_id`, which is what ID tokens carry).
 `nbf` is checked when present.
+
+Machine identities (client credentials, GitHub Actions, Google and Azure workload
+identity, Kubernetes) can come from further issuers, `[issuers.<name>]`, each with its
+own required `audience`. Only profile selectors that name such an issuer match its
+tokens.
+
+### Host certificates
+
+Profiles with `cert_types = ["host"]` issue host certificates: to hosts signing in as
+machines (names from their token's claims), to administrators, or to an orchestrator
+that signs for the hosts it manages (names requested, limited by
+`matching_principals`). The client's `host` command renews a machine's certificates
+from a timer, and `ca-keys` prints the `@cert-authority` lines for `known_hosts`. See
+[docs/hosts.md](docs/hosts.md).
 
 ### CA key backends
 
@@ -285,7 +298,13 @@ Client
 ssh-casign-client [OPTIONS] login [-k KEY] [--new] [--min-remaining DURATION] [REQUEST OPTIONS]
 ssh-casign-client [OPTIONS] logout [--keep-agent]
 ssh-casign-client [OPTIONS] cert [-t user|host] [-o FILE] [REQUEST OPTIONS] [PUBLIC_KEY_FILE]
+ssh-casign-client [OPTIONS] host [-n NAME] [--renew-before DURATION] [--on-change CMD] [KEY.pub ...]
+ssh-casign-client [OPTIONS] ca-keys [-t user|host] [--hosts PATTERN]
 ```
+
+`host` and `ca-keys` are described in [docs/hosts.md](docs/hosts.md), together with
+the non-interactive sign-in methods for machines (`client-credentials`, `token-file`,
+`gcp-metadata`, `azure-managed-identity`, `github-actions`).
 
 `login` signs in and loads a certificate into `ssh-agent` (`$SSH_AUTH_SOCK`). The
 agent forgets the key when the certificate expires, so there is nothing to clean up:
@@ -373,16 +392,19 @@ profile's defaults:
 
 Global options:
 
-| Option              | Environment              | Meaning                                       |
-|---------------------|--------------------------|-----------------------------------------------|
-| `-f, --config-file` | `SSH_CASIGN_CONFIG`      | Config file                                   |
-| `-p, --profile`     | `SSH_CASIGN_PROFILE`     | Profile from the config file                  |
-| `-u, --url`         | `SSH_CASIGN_URL`         | Service base URL; overrides the profile's URL |
-| `--sign-in`         | `SSH_CASIGN_SIGN_IN`     | `device` or `authorization-code` (`browser`)  |
-| `--token-store`     | `SSH_CASIGN_TOKEN_STORE` | `keyring` (default), `file` or `none`         |
-|                     | `SSH_CASIGN_CACHE_DIR`   | Directory for the `file` token store          |
-|                     | `SSH_CASIGN_TOKEN`       | Use this bearer token, skip sign-in (testing) |
-|                     | `RUST_LOG`               | Log verbosity (default `warn`)                |
+| Option              | Environment                | Meaning                                       |
+|---------------------|----------------------------|-----------------------------------------------|
+| `-f, --config-file` | `SSH_CASIGN_CONFIG`        | Config file                                   |
+| `-p, --profile`     | `SSH_CASIGN_PROFILE`       | Profile from the config file                  |
+| `-u, --url`         | `SSH_CASIGN_URL`           | Service base URL; overrides the profile's URL |
+| `--sign-in`         | `SSH_CASIGN_SIGN_IN`       | `device`, `authorization-code` (`browser`), … |
+| `--token-store`     | `SSH_CASIGN_TOKEN_STORE`   | `keyring` (default), `file` or `none`         |
+|                     | `SSH_CASIGN_CACHE_DIR`     | Directory for the `file` token store          |
+|                     | `SSH_CASIGN_TOKEN`         | Use this bearer token, skip sign-in (testing) |
+|                     | `SSH_CASIGN_CLIENT_SECRET` | Client secret for `client-credentials`        |
+|                     | `RUST_LOG`                 | Log verbosity (default `warn`)                |
+
+`--sign-in` also takes the machine methods from [docs/hosts.md](docs/hosts.md).
 
 `cert` reads the public key from `PUBLIC_KEY_FILE`, or from stdin when that is omitted or
 `-`. It writes the certificate to `-o FILE`. Without `-o`, it follows OpenSSH's naming

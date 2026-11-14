@@ -12,6 +12,9 @@ pub struct Config {
     /// Address to listen on (see [`Config::listen`] for platform overrides).
     listen: Option<String>,
     pub(crate) oidc_provider: crate::web::oidc::Config,
+    /// Further trusted issuers, for machine identities (`[issuers.<name>]`).
+    #[serde(default)]
+    pub(crate) issuers: std::collections::BTreeMap<String, crate::web::oidc::IssuerConfig>,
     pub(crate) profiles: crate::certificate::profiles::Profiles,
     pub(crate) authorities: ssh_casign_ca::Config,
     /// Audit log; without it, issued certificates are only in the service log.

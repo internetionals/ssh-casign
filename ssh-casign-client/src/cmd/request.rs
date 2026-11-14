@@ -204,31 +204,61 @@ pub(super) fn obtain_certificate(
     target: &super::Target,
     sign_key_request: &SignKeyRequest,
 ) -> Result<Certificate> {
+    let mut certificates = obtain_certificates(target, std::slice::from_ref(sign_key_request))?;
+    Ok(certificates.remove(0))
+}
+
+/// Like [`obtain_certificate`], for several keys with one sign-in.
+pub(super) fn obtain_certificates(
+    target: &super::Target,
+    sign_key_requests: &[SignKeyRequest],
+) -> Result<Vec<Certificate>> {
     runtime()?.block_on(async {
         let http = reqwest::Client::new();
         let service = discovery::discover(&http, &target.url).await?;
         let stored = stored_token(target, &service);
+        let issuer = target.issuer.as_ref().unwrap_or(&service.info.issuer);
         let request = auth::SignInRequest {
             method: target.sign_in,
-            issuer: &service.info.issuer,
+            issuer,
             client_id: target.client_id.as_ref().unwrap_or(&service.info.client_id),
             scopes: target.scopes.as_ref().unwrap_or(&service.info.scopes),
+            machine: auth::machine::MachineSettings {
+                issuer,
+                client_id: target.client_id.as_deref(),
+                client_secret_file: target.client_secret_file.as_deref(),
+                // The service's scopes are for people signing in.
+                scopes: target.scopes.as_deref(),
+                audience: target.audience.as_deref(),
+                token_file: target.token_file.as_deref(),
+            },
         };
-        let (token, source) = auth::sign_in(&http, &request, &stored, true).await?;
-        match sign::sign(&http, &service.sign_endpoint, &token, sign_key_request).await {
-            Err(err)
-                if source == auth::TokenSource::Refreshed
-                    && err.downcast_ref::<sign::Unauthorized>().is_some() =>
-            {
-                tracing::info!("the service rejected the refreshed token, signing in again: {err}");
-                if let Err(err) = stored.delete() {
-                    tracing::warn!("can't remove the cached refresh token: {err:#}");
+        let (mut token, source) = auth::sign_in(&http, &request, &stored, true).await?;
+        let mut certificates = Vec::with_capacity(sign_key_requests.len());
+        let mut retried = false;
+        for sign_key_request in sign_key_requests {
+            match sign::sign(&http, &service.sign_endpoint, &token, sign_key_request).await {
+                Err(err)
+                    if !retried
+                        && source == auth::TokenSource::Refreshed
+                        && err.downcast_ref::<sign::Unauthorized>().is_some() =>
+                {
+                    tracing::info!(
+                        "the service rejected the refreshed token, signing in again: {err}"
+                    );
+                    if let Err(err) = stored.delete() {
+                        tracing::warn!("can't remove the cached refresh token: {err:#}");
+                    }
+                    retried = true;
+                    token = auth::sign_in(&http, &request, &stored, false).await?.0;
+                    certificates.push(
+                        sign::sign(&http, &service.sign_endpoint, &token, sign_key_request).await?,
+                    );
                 }
-                let (token, _) = auth::sign_in(&http, &request, &stored, false).await?;
-                sign::sign(&http, &service.sign_endpoint, &token, sign_key_request).await
+                result => certificates.push(result?),
             }
-            result => result,
         }
+        Ok(certificates)
     })
 }
 

@@ -1,4 +1,14 @@
-use std::{ops::Deref, sync::Arc};
+//! Token validation: the interactive sign-in provider (`[oidc_provider]`,
+//! published in the discovery document) and further trusted issuers
+//! (`[issuers.<name>]`) for machine identities: OIDC client credentials,
+//! GitHub Actions, Google and Azure workload identity, Kubernetes service
+//! accounts, ...
+//!
+//! A token is routed by its (not yet verified) `iss` claim to the issuer
+//! configurations with that issuer, and accepted by the first one whose
+//! validation (signature, `exp`, `nbf`, `iss`, `aud`) succeeds.
+
+use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
     extract::{FromRef, FromRequestParts},
@@ -10,13 +20,27 @@ use axum_extra::{
     headers::{authorization::Bearer, Authorization},
     TypedHeader,
 };
+use base64ct::{Base64UrlUnpadded, Encoding as _};
 use oidc_jwt_validator::Validator;
 use serde::Deserialize;
 
 use super::state::AppState;
+use crate::certificate::profiles::TokenClaims;
+
+/// Name under which profile selectors refer to `[oidc_provider]`; it is
+/// also what selectors without `issuer` mean.
+pub(crate) const PRIMARY_ISSUER: &str = "oidc_provider";
 
 fn default_scopes() -> Vec<String> {
     vec!["openid".to_string()]
+}
+
+fn default_id_claim() -> String {
+    "sub".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -39,10 +63,32 @@ pub(crate) struct Config {
     /// a UPN, a UUID or a pseudonymous ID.
     #[serde(default = "default_id_claim")]
     id_claim: String,
+    /// Read certificate defaults and limits from the token's claims
+    /// (`max_validity`, `allowed_principals`, ...). Default true: the IdP is
+    /// the organisation's own.
+    #[serde(default = "default_true")]
+    token_policy: bool,
 }
 
-fn default_id_claim() -> String {
-    "sub".to_string()
+/// A further trusted issuer, `[issuers.<name>]`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct IssuerConfig {
+    /// Must match the `iss` claim exactly; `<issuer>/.well-known/openid-configuration`
+    /// must be reachable (for the signing keys).
+    issuer: String,
+    /// Accepted values of the `aud` claim. Required: machine tokens are
+    /// requested for an audience, and a token for another service must not
+    /// work here.
+    audience: Vec<String>,
+    /// Claim that identifies the machine or workload (`{{oidc_id}}`).
+    #[serde(default = "default_id_claim")]
+    id_claim: String,
+    /// Read certificate defaults and limits from the token's claims. Default
+    /// false: tokens of third parties (GitHub, Google, ...) carry claims this
+    /// service shouldn't take as policy.
+    #[serde(default)]
+    token_policy: bool,
 }
 
 impl Config {
@@ -54,51 +100,133 @@ impl Config {
         &self.client_id
     }
 
-    pub(crate) fn id_claim(&self) -> &str {
-        &self.id_claim
-    }
-
     pub(crate) fn scopes(&self) -> &[String] {
         &self.scopes
     }
+}
 
-    pub(crate) async fn get_validator(&self) -> Result<Validator, Box<dyn std::error::Error>> {
-        let http_client = reqwest::ClientBuilder::new().build()?;
-        let mut validation_settings = oidc_jwt_validator::ValidationSettings::new();
-        // Without listing them as required, `iss` and `aud` are only checked
-        // when the token happens to contain them.
-        validation_settings.set_required_spec_claims(&["exp", "iss", "aud"]);
-        validation_settings.validate_nbf = true;
-        validation_settings.set_issuer(&[self.issuer.as_str()]);
-        match &self.audience {
-            Some(audience) => validation_settings.set_audience(audience),
-            None => validation_settings.set_audience(&[self.client_id.as_str()]),
+/// An issuer whose tokens are accepted.
+pub(crate) struct TrustedIssuer {
+    /// `oidc_provider`, or the name in `[issuers.<name>]`.
+    pub(crate) name: String,
+    /// The issuer URL (`iss`).
+    pub(crate) issuer: String,
+    pub(crate) id_claim: String,
+    pub(crate) token_policy: bool,
+    validator: Validator,
+}
+
+async fn validator(issuer: &str, audience: &[String]) -> Result<Validator, String> {
+    let http_client = reqwest::ClientBuilder::new()
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut validation_settings = oidc_jwt_validator::ValidationSettings::new();
+    // Without listing them as required, `iss` and `aud` are only checked
+    // when the token happens to contain them.
+    validation_settings.set_required_spec_claims(&["exp", "iss", "aud"]);
+    validation_settings.validate_nbf = true;
+    validation_settings.set_issuer(&[issuer]);
+    validation_settings.set_audience(audience);
+    Validator::new(
+        issuer,
+        http_client,
+        oidc_jwt_validator::cache::Strategy::Automatic,
+        validation_settings,
+    )
+    .await
+    .map_err(|err| format!("OpenID Connect provider {issuer}: {err}"))
+}
+
+/// All trusted issuers, `[oidc_provider]` first.
+pub(crate) struct Issuers(Vec<TrustedIssuer>);
+
+impl Issuers {
+    pub(crate) async fn load(
+        primary: &Config,
+        extra: &BTreeMap<String, IssuerConfig>,
+    ) -> Result<Self, String> {
+        let audience = primary
+            .audience
+            .clone()
+            .unwrap_or_else(|| vec![primary.client_id.clone()]);
+        let mut issuers = vec![TrustedIssuer {
+            name: PRIMARY_ISSUER.to_string(),
+            issuer: primary.issuer.clone(),
+            id_claim: primary.id_claim.clone(),
+            token_policy: primary.token_policy,
+            validator: validator(&primary.issuer, &audience).await?,
+        }];
+        for (name, config) in extra {
+            if name == PRIMARY_ISSUER {
+                return Err(format!(
+                    "issuers.{name}: the name is reserved for [oidc_provider]"
+                ));
+            }
+            if config.audience.is_empty() {
+                return Err(format!("issuers.{name}: audience must not be empty"));
+            }
+            tracing::info!("trusting issuer {name} ({})", config.issuer);
+            issuers.push(TrustedIssuer {
+                name: name.clone(),
+                issuer: config.issuer.clone(),
+                id_claim: config.id_claim.clone(),
+                token_policy: config.token_policy,
+                validator: validator(&config.issuer, &config.audience)
+                    .await
+                    .map_err(|err| format!("issuers.{name}: {err}"))?,
+            });
         }
-        let validator = Validator::new(
-            self.issuer.as_str(),
-            http_client,
-            oidc_jwt_validator::cache::Strategy::Automatic,
-            validation_settings,
-        )
-        .await
-        .map_err(|err| format!("OpenID Connect provider {}: {err}", self.issuer))?;
-        Ok(validator)
+        Ok(Self(issuers))
+    }
+
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        self.0.iter().any(|issuer| issuer.name == name)
+    }
+
+    /// Validate `token` with the issuer configurations for its `iss`.
+    async fn validate(&self, token: &str) -> Result<(&TrustedIssuer, TokenClaims), String> {
+        let iss = unverified_issuer(token)?;
+        let mut last_error = None;
+        for issuer in self.0.iter().filter(|issuer| issuer.issuer == iss) {
+            match issuer.validator.validate::<TokenClaims>(token).await {
+                Ok(data) => return Ok((issuer, data.claims)),
+                Err(err) => last_error = Some(err.to_string()),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| format!("issuer {iss} is not trusted")))
     }
 }
 
-/// Claims<T> can be used to require OpenID Connect authorization
-/// The supplied struct can be used to fetch possible relevant OpenID Connect claims
-///
-/// Usage: `async fn some_axum_handler(claims: Claims<MyClaims>)`
-#[derive(Debug)]
-pub(super) struct Claims<T: for<'de> Deserialize<'de>>(T);
-
-impl<T: for<'de> Deserialize<'de>> Deref for Claims<T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+/// The `iss` claim of a JWT, before the signature is checked: only used to
+/// pick the validator.
+fn unverified_issuer(token: &str) -> Result<String, String> {
+    let payload = token
+        .split('.')
+        .nth(1)
+        .ok_or_else(|| "not a JWT".to_string())?;
+    let payload = Base64UrlUnpadded::decode_vec(payload.trim_end_matches('='))
+        .map_err(|_| "not a JWT".to_string())?;
+    #[derive(Deserialize)]
+    struct Issuer {
+        iss: String,
     }
+    serde_json::from_slice::<Issuer>(&payload)
+        .map(|claims| claims.iss)
+        .map_err(|_| "token has no issuer".to_string())
+}
+
+/// A validated token: its issuer and claims.
+pub(super) struct Authenticated {
+    pub(super) issuer: IssuerRef,
+    pub(super) claims: TokenClaims,
+}
+
+/// The parts of the [`TrustedIssuer`] a request needs.
+pub(super) struct IssuerRef {
+    pub(super) name: String,
+    pub(super) issuer: String,
+    pub(super) id_claim: String,
+    pub(super) token_policy: bool,
 }
 
 pub(super) enum AuthError {
@@ -140,31 +268,59 @@ impl IntoResponse for AuthError {
 }
 
 #[axum::async_trait]
-impl<S, T: for<'de> Deserialize<'de>> FromRequestParts<S> for Claims<T>
+impl<S> FromRequestParts<S> for Authenticated
 where
-    // Arc<Validator>: FromRef<S>,
     Arc<AppState>: FromRef<S>,
     S: Send + Sync,
 {
-    // If anything goes wrong or no session is found, redirect to the auth page
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        // Extract the token from the authorization header
         let TypedHeader(Authorization(bearer)) = parts
             .extract::<TypedHeader<Authorization<Bearer>>>()
             .await
             .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
-
-        // Validate token
         let state = Arc::<AppState>::from_ref(state);
-        let token_data = state
-            .oidc_validator
-            .validate::<T>(bearer.token())
+        let (issuer, claims) = state
+            .issuers
+            .validate(bearer.token())
             .await
-            .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
+            .map_err(AuthError::InvalidToken)?;
+        Ok(Authenticated {
+            issuer: IssuerRef {
+                name: issuer.name.clone(),
+                issuer: issuer.issuer.clone(),
+                id_claim: issuer.id_claim.clone(),
+                token_policy: issuer.token_policy,
+            },
+            claims,
+        })
+    }
+}
 
-        // Return claims
-        Ok(Claims(token_data.claims))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jwt(payload: &str) -> String {
+        format!(
+            "{}.{}.sig",
+            Base64UrlUnpadded::encode_string(br#"{"alg":"RS256"}"#),
+            Base64UrlUnpadded::encode_string(payload.as_bytes())
+        )
+    }
+
+    #[test]
+    fn issuer_is_read_for_routing() {
+        assert_eq!(
+            unverified_issuer(&jwt(
+                r#"{"iss":"https://token.actions.githubusercontent.com"}"#
+            ))
+            .unwrap(),
+            "https://token.actions.githubusercontent.com"
+        );
+        assert!(unverified_issuer(&jwt(r#"{"sub":"x"}"#)).is_err());
+        assert!(unverified_issuer("opaque-access-token").is_err());
+        assert!(unverified_issuer("a.!!!.c").is_err());
     }
 }

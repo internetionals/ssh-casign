@@ -15,8 +15,7 @@ use crate::{
     certificate::{
         key_id,
         policy::{self, Policies, Policy},
-        profiles::TokenClaims,
-        template,
+        profiles, template,
     },
 };
 
@@ -120,7 +119,7 @@ struct Certificate {
 pub(super) async fn sign_key(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    claims: super::oidc::Claims<TokenClaims>,
+    auth: super::oidc::Authenticated,
     State(state): State<Arc<super::state::AppState>>,
     Json(payload): Json<SignKeyRequest>,
 ) -> Response {
@@ -129,7 +128,8 @@ pub(super) async fn sign_key(
         app_name: payload.app_name.clone(),
         ..Context::default()
     };
-    let result = issue(&state, &claims, payload, &mut context).await;
+    let result = issue(&state, &auth, payload, &mut context).await;
+    let claims = &auth.claims;
 
     let origin = state.origin.resolve(peer, &headers);
     let requester = audit::Requester {
@@ -138,7 +138,7 @@ pub(super) async fn sign_key(
         client_port: origin.client_port,
         proxy: origin.proxy,
         correlation_id: origin.correlation_id.as_deref(),
-        issuer: state.config.oidc_provider.issuer(),
+        issuer: &auth.issuer.issuer,
         subject: claims.get("sub").and_then(|sub| sub.as_str()),
         oidc_id: context.oidc_id.as_deref(),
         profile: context.profile.as_deref(),
@@ -174,33 +174,38 @@ pub(super) async fn sign_key(
 
 async fn issue(
     state: &super::state::AppState,
-    claims: &TokenClaims,
+    auth: &super::oidc::Authenticated,
     payload: SignKeyRequest,
     context: &mut Context,
 ) -> Result<Certificate, Failure> {
+    let claims = &auth.claims;
     let client_public_key = ssh_key::PublicKey::from_openssh(&payload.public_key)
         .map_err(|_| Failure::new(StatusCode::BAD_REQUEST, "Not a valid ssh public key"))?;
 
-    let cert_type = match payload.cert_type {
-        // Issuing host certificates based on a user login needs its own trust
-        // model; refuse until that is designed.
-        CertType::Host => {
-            return Err(Failure::new(
-                StatusCode::NOT_IMPLEMENTED,
-                "Host certificates are not supported yet",
-            ))
-        }
+    let requested_type = payload.cert_type;
+    let cert_type = match requested_type {
+        CertType::Host => ssh_key::certificate::CertType::Host,
         CertType::User => ssh_key::certificate::CertType::User,
     };
+    let host = requested_type == CertType::Host;
 
     let accepted_algorithms =
         parse_signature_algorithms(payload.ca_signature_algorithms.as_deref())?;
-    let oidc_id = key_id::oidc_id(claims, state.config.oidc_provider.id_claim())
+    let oidc_id = key_id::oidc_id(claims, &auth.issuer.id_claim)
         .map_err(|err| Failure::new(StatusCode::FORBIDDEN, err.to_string()))?;
     context.oidc_id = Some(oidc_id.clone());
-    let profile =
-        state.config.profiles.lookup(claims).ok_or_else(|| {
-            Failure::new(StatusCode::FORBIDDEN, "No applicable profile for client")
+    let profile = state
+        .config
+        .profiles
+        .lookup(&auth.issuer.name, claims, requested_type)
+        .ok_or_else(|| {
+            Failure::new(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "No profile issues {} certificates for this client",
+                    profiles::cert_type_name(requested_type)
+                ),
+            )
         })?;
     context.profile = Some(profile.name.to_string());
 
@@ -213,16 +218,30 @@ async fn issue(
         claims,
     };
     let profile_policy = profile.settings.policy_for(&template_context(None, None));
-    let token_policy: Policy = serde_json::from_value(serde_json::Value::Object(claims.clone()))
-        .map_err(|err| {
+    // Only issuers trusted with it may set policy through claims.
+    let token_policy: Policy = if auth.issuer.token_policy {
+        serde_json::from_value(serde_json::Value::Object(claims.clone())).map_err(|err| {
             Failure::new(
                 StatusCode::FORBIDDEN,
                 format!("Invalid certificate claims in token: {err}"),
             )
-        })?;
+        })?
+    } else {
+        Policy::default()
+    };
+    let (profile_policy, token_policy, principals) = if host {
+        let lowercase = |names: Vec<String>| names.iter().map(|name| name.to_lowercase()).collect();
+        (
+            profile_policy.for_host(),
+            token_policy.for_host(),
+            payload.principals.map(lowercase),
+        )
+    } else {
+        (profile_policy, token_policy, payload.principals)
+    };
     let request = policy::Request {
         validity: payload.validity,
-        principals: payload.principals,
+        principals,
         extensions: payload.extensions,
         critical_options: payload.critical_options,
         app_name: payload.app_name,
@@ -259,6 +278,7 @@ async fn issue(
     let (authority, provider, algorithm) = authority_crate::select(
         profile.settings.authorities(),
         &state.authorities,
+        requested_type,
         accepted_algorithms.as_deref(),
     )
     .map_err(|err| {

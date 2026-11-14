@@ -276,15 +276,34 @@ pub enum SignError {
 }
 
 /// The authority and signature algorithm for a request: the first authority
-/// in the profile's order that offers one of the `accepted` algorithms (any,
-/// if the client didn't say), with its most preferred such algorithm.
+/// in the profile's order that signs `cert_type` and offers one of the
+/// `accepted` algorithms (any, if the client didn't say), with its most
+/// preferred such algorithm.
 pub fn select<'a>(
     profile_authorities: &'a [Arc<str>],
     authorities: &Authorities,
+    cert_type: CertType,
     accepted: Option<&[SignatureAlgorithm]>,
 ) -> Result<(&'a str, Arc<Authority>, SignatureAlgorithm), String> {
+    let signs_type = |name: &Arc<str>| {
+        authorities
+            .get(name)
+            .filter(|authority| authority.cert_types.contains(&cert_type))
+    };
+    if !profile_authorities
+        .iter()
+        .any(|name| signs_type(name).is_some())
+    {
+        let kind = match cert_type {
+            CertType::User => "user",
+            CertType::Host => "host",
+        };
+        return Err(format!(
+            "no authority of this profile signs {kind} certificates"
+        ));
+    }
     for name in profile_authorities {
-        let Some(authority) = authorities.get(name) else {
+        let Some(authority) = signs_type(name) else {
             continue;
         };
         let algorithm = authority
@@ -298,7 +317,7 @@ pub fn select<'a>(
     }
     let offered: Vec<String> = profile_authorities
         .iter()
-        .filter_map(|name| authorities.get(name))
+        .filter_map(signs_type)
         .flat_map(|authority| {
             authority
                 .signature_algorithms()
@@ -387,11 +406,19 @@ mod tests {
     }
 
     fn authority(seed: u8, algorithms: &[SignatureAlgorithm]) -> Authority {
+        typed_authority(seed, algorithms, CertType::User)
+    }
+
+    fn typed_authority(
+        seed: u8,
+        algorithms: &[SignatureAlgorithm],
+        cert_type: CertType,
+    ) -> Authority {
         let key = KeyData::Ed25519(ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]).public);
         Authority {
             public_key: PublicKey::from(key.clone()),
             backend: Box::new(TestBackend(key, algorithms.to_vec())),
-            cert_types: vec![CertType::User],
+            cert_types: vec![cert_type],
             signature_algorithms: algorithms.to_vec(),
         }
     }
@@ -412,7 +439,7 @@ mod tests {
             .map(Arc::from)
             .collect();
         let pick = |accepted: Option<&[SignatureAlgorithm]>| {
-            select(&profile, &authorities, accepted)
+            select(&profile, &authorities, CertType::User, accepted)
                 .map(|(name, _, algorithm)| (name.to_string(), algorithm))
         };
         assert_eq!(pick(None).unwrap(), ("ed25519".into(), Ed25519));
@@ -432,6 +459,26 @@ mod tests {
                 && err.contains("available: [ssh-ed25519, rsa-sha2-512"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn selection_skips_authorities_for_other_cert_types() {
+        use SignatureAlgorithm::*;
+        let authorities: Authorities = [
+            ("user", typed_authority(1, &[Ed25519], CertType::User)),
+            ("host", typed_authority(2, &[Ed25519], CertType::Host)),
+        ]
+        .into_iter()
+        .map(|(name, authority)| (Arc::from(name), Arc::new(authority)))
+        .collect();
+        let both: Vec<Arc<str>> = ["user", "host"].into_iter().map(Arc::from).collect();
+        let pick = |profile: &[Arc<str>], cert_type| {
+            select(profile, &authorities, cert_type, None).map(|(name, _, _)| name.to_string())
+        };
+        assert_eq!(pick(&both, CertType::User).unwrap(), "user");
+        assert_eq!(pick(&both, CertType::Host).unwrap(), "host");
+        let err = pick(&both[..1], CertType::Host).unwrap_err();
+        assert!(err.contains("host certificates"), "{err}");
     }
 
     fn test_loader(config: toml::Table) -> BoxFuture<'static, Result<Box<dyn Backend>, String>> {

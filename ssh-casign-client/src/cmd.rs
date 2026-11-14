@@ -2,7 +2,9 @@ use clap::Parser;
 use std::path::PathBuf;
 use url::Url;
 
+mod ca_keys;
 mod cert;
+mod host;
 mod login;
 mod logout;
 mod request;
@@ -19,6 +21,11 @@ enum Cmd {
     Login(login::Args),
     /// Forget the cached sign-in and remove the keys login added to ssh-agent
     Logout(logout::Args),
+    /// Sign this machine's host keys and install the certificates (for a
+    /// renewal timer)
+    Host(host::Args),
+    /// Print the service's CA keys (for TrustedUserCAKeys or known_hosts)
+    CaKeys(ca_keys::Args),
 }
 
 #[derive(Parser)]
@@ -55,6 +62,10 @@ pub(crate) struct Target {
     pub(crate) sign_in: SignInMethod,
     pub(crate) client_id: Option<String>,
     pub(crate) scopes: Option<Vec<String>>,
+    pub(crate) issuer: Option<String>,
+    pub(crate) client_secret_file: Option<PathBuf>,
+    pub(crate) audience: Option<String>,
+    pub(crate) token_file: Option<PathBuf>,
     pub(crate) app_name: Option<String>,
     pub(crate) token_store: TokenStore,
     pub(crate) ca_signature_algorithms: Option<Vec<String>>,
@@ -84,6 +95,10 @@ fn resolve_target(args: &Args, config: &Config) -> Result<Target> {
         sign_in,
         client_id: profile.and_then(|profile| profile.client_id.clone()),
         scopes: profile.and_then(|profile| profile.scopes.clone()),
+        issuer: profile.and_then(|profile| profile.issuer.clone()),
+        client_secret_file: profile.and_then(|profile| profile.client_secret_file.clone()),
+        audience: profile.and_then(|profile| profile.audience.clone()),
+        token_file: profile.and_then(|profile| profile.token_file.clone()),
         app_name: profile
             .and_then(|profile| profile.app_name.clone())
             .or_else(|| config.app_name.clone()),
@@ -102,6 +117,8 @@ pub(crate) fn run_with_config(args: &Args, config: &Config) -> CmdResult {
         Cmd::Cert(cert_args) => cert::run(cert_args, &target),
         Cmd::Login(login_args) => login::run(login_args, &target),
         Cmd::Logout(logout_args) => logout::run(logout_args, &target),
+        Cmd::Host(host_args) => host::run(host_args, &target),
+        Cmd::CaKeys(ca_keys_args) => ca_keys::run(ca_keys_args, &target),
     }
 }
 

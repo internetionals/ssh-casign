@@ -6,6 +6,7 @@ description = "ssh-casign service logic: OIDC, certificate policy, key IDs, audi
 
 [dependencies]
 axum = { version = "0.7.7", features = ["macros"] }
+base64ct = { version = "1.8.3", features = ["alloc"] }
 axum-extra = { version = "0.9.4", features = ["typed-header"] }
 libc = "0.2.191"
 oidc-jwt-validator = "0.2.3"
