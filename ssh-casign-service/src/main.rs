@@ -29,6 +29,10 @@ fn registry() -> Registry {
     registry.register(ssh_casign_ca_azure::PROVIDER, ssh_casign_ca_azure::load);
     #[cfg(not(feature = "ca-azure-keyvault"))]
     registry.unavailable("azure_keyvault", "ca-azure-keyvault");
+    #[cfg(feature = "ca-aws-kms")]
+    registry.register(ssh_casign_ca_aws::PROVIDER, ssh_casign_ca_aws::load);
+    #[cfg(not(feature = "ca-aws-kms"))]
+    registry.unavailable("aws_kms", "ca-aws-kms");
     registry
 }
 

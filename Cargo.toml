@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
 	"ssh-casign-ca",
+	"ssh-casign-ca-aws",
 	"ssh-casign-ca-azure",
 	"ssh-casign-ca-file",
 	"ssh-casign-ca-pkcs11",

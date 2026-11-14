@@ -16,7 +16,7 @@ build lacks fails at startup with the feature to enable.
 | `file`           | `ca-file`           | done    | OpenSSH private key file (default feature)            |
 | `pkcs11`         | `ca-pkcs11`         | done    | YubiKey (ykcs11), smart cards (OpenSC), SoftHSM, HSMs |
 | `vault`          | `ca-vault`          | done    | OpenBao / HashiCorp Vault transit engine              |
-| `aws_kms`        | `ca-aws-kms`        | planned | AWS KMS                                               |
+| `aws_kms`        | `ca-aws-kms`        | done    | AWS KMS                                               |
 | `azure_keyvault` | `ca-azure-keyvault` | done    | Azure Key Vault / Managed HSM                         |
 | `gcp_kms`        | `ca-gcp-kms`        | planned | Google Cloud KMS                                      |
 
@@ -27,8 +27,9 @@ cargo build --release -p ssh-casign-service --no-default-features --features ca-
 # with OpenBao / Vault, keeping file-based CAs available
 cargo build --release -p ssh-casign-service --features ca-vault
 
-# Azure Functions: static binary, see deploy/azure-functions
+# Azure Functions and AWS Lambda: static binaries, see deploy/
 deploy/azure-functions/build.sh
+deploy/aws-lambda/build.sh
 ```
 
 TLS for outgoing connections (IdP, Vault, Key Vault) is a feature too: `tls-native`
@@ -47,7 +48,7 @@ An authority offers the algorithms that both its key and its backend support (se
 | file           | yes                                                       | yes                 | yes                  | yes                  |
 | pkcs11         | if the token has `CKM_EDDSA` (YubiKey 5.7+, SoftHSM 2.6+) | yes (`CKM_ECDSA`)   | yes (`CKM_RSA_PKCS`) | yes                  |
 | vault          | yes                                                       | yes                 | yes                  | yes                  |
-| AWS KMS        | to check                                                  | yes                 | yes                  | no                   |
+| aws_kms        | yes (`ECC_NIST_EDWARDS25519`)                             | yes                 | yes                  | no                   |
 | azure_keyvault | no                                                        | yes                 | yes                  | no                   |
 | GCP KMS        | yes                                                       | P-256/384           | yes                  | only raw-PKCS#1 keys |
 
@@ -154,6 +155,37 @@ cert_types = ["user"]
   is valid for longer than macOS accepts, so on macOS use a `tls-rustls` build for that.
 
 Deployment on Azure Functions: [deploy/azure-functions](../deploy/azure-functions/README.md).
+
+`aws_kms`
+---------
+
+```toml
+[authorities.kms]
+provider = "aws_kms"
+key_id = "alias/ssh-ca"        # key ID, key ARN, alias name or alias ARN
+# region = "eu-west-1"         # default: from an ARN, else AWS_REGION / AWS_DEFAULT_REGION
+# endpoint_url = "…"           # VPC/FIPS endpoint, LocalStack; default AWS_ENDPOINT_URL_KMS
+# profile = "ssh-ca"           # default: AWS_PROFILE, else the credential chain
+cert_types = ["user"]
+```
+
+- Key specs: `ECC_NIST_EDWARDS25519` (Ed25519; KMS signs the certificate itself, which
+  must be at most 4096 bytes), `ECC_NIST_P256/P384/P521` and `RSA_2048/3072/4096` (the
+  service hashes, KMS signs the digest). KMS has no SHA-1, so no `ssh-rsa`.
+- Aliases are resolved at startup and the service signs with that key ARN, so moving
+  the alias doesn't change the advertised key until a restart. KMS asymmetric keys have
+  no versions; rotate with a new key.
+- Requests are signed with AWS Signature Version 4 (checked against botocore's output
+  in the tests). Credentials, in this order: a named profile (`profile` or
+  `AWS_PROFILE`, static keys only), environment variables (Lambda), web identity
+  (`AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`, EKS), the `default` profile,
+  container credentials (ECS, EKS Pod Identity), IMDSv2 (EC2). SSO and role-chaining
+  profiles aren't supported. Temporary credentials are refreshed before they expire.
+- The identity needs `kms:GetPublicKey` and `kms:Sign` on the key.
+- Tested with LocalStack 4.0.3 (P-256, P-384, RSA) and `sshd`; that LocalStack version
+  predates KMS Ed25519, so Ed25519 is covered by unit tests only.
+
+Deployment on AWS Lambda: [deploy/aws-lambda](../deploy/aws-lambda/README.md).
 
 Writing a backend
 -----------------

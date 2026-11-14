@@ -17,19 +17,20 @@ writes the certificate to disk or loads it into `ssh-agent`.
 Workspace layout
 ----------------
 
-| Path                    | Contents                                                                                                                            |
-|-------------------------|-------------------------------------------------------------------------------------------------------------------------------------|
-| `ssh-casign-service/`   | The service binary: config source, logging, TLS, which backends a build has                                                         |
-| `ssh-casign-core/`      | Service logic: OIDC, certificate policy, key IDs, audit, HTTP API                                                                   |
-| `ssh-casign-ca/`        | Certificates with pluggable key backends: `Backend` trait, signature algorithms, certificate encoding and verification, authorities |
-| `ssh-casign-ca-file/`   | Backend: OpenSSH private key file                                                                                                   |
-| `ssh-casign-ca-pkcs11/` | Backend: PKCS#11 tokens (YubiKey, smart cards, HSMs)                                                                                |
-| `ssh-casign-ca-vault/`  | Backend: OpenBao / HashiCorp Vault transit                                                                                          |
-| `ssh-casign-ca-azure/`  | Backend: Azure Key Vault / Managed HSM, Entra ID credentials                                                                        |
-| `ssh-casign-client/`    | CLI client (clap): discovery, sign-in, `login`, `cert`, `logout`                                                                    |
-| `ssh-casign-proto/`     | Wire types shared by service and client                                                                                             |
-| `deploy/`               | Platform packages (Azure Functions)                                                                                                 |
-| `poc/`                  | Test IdPs, CA keys, configs and scripts (not in git)                                                                                |
+| Path                    | Contents                                                                    |
+|-------------------------|-----------------------------------------------------------------------------|
+| `ssh-casign-service/`   | The service binary: config source, logging, TLS, which backends a build has |
+| `ssh-casign-core/`      | Service logic: OIDC, certificate policy, key IDs, audit, HTTP API           |
+| `ssh-casign-ca/`        | Backend API, certificate encoding and verification, authorities             |
+| `ssh-casign-ca-file/`   | Backend: OpenSSH private key file                                           |
+| `ssh-casign-ca-pkcs11/` | Backend: PKCS#11 tokens (YubiKey, smart cards, HSMs)                        |
+| `ssh-casign-ca-vault/`  | Backend: OpenBao / HashiCorp Vault transit                                  |
+| `ssh-casign-ca-azure/`  | Backend: Azure Key Vault / Managed HSM, Entra ID credentials                |
+| `ssh-casign-ca-aws/`    | Backend: AWS KMS, SigV4 and AWS credentials                                 |
+| `ssh-casign-client/`    | CLI client (clap): discovery, sign-in, `login`, `cert`, `logout`            |
+| `ssh-casign-proto/`     | Wire types shared by service and client                                     |
+| `deploy/`               | Platform packages (Azure Functions, AWS Lambda) and the static build        |
+| `poc/`                  | Test IdPs, CA keys, configs and scripts (not in git)                        |
 
 Backend crates depend only on `ssh-casign-ca`; the core never depends on a backend. The
 service binary registers the backends its Cargo features (`ca-*`) select.
@@ -117,9 +118,9 @@ and `aud`. `iss` must equal `oidc_provider.issuer`, and `aud` must contain one o
 ### CA key backends
 
 CA keys can be in a file, on a PKCS#11 token (YubiKey, smart card, HSM), in
-OpenBao/Vault's transit engine or in Azure Key Vault; AWS KMS and Google Cloud KMS are
+OpenBao/Vault's transit engine, in Azure Key Vault or in AWS KMS; Google Cloud KMS is
 planned. Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`,
-`ca-azure-keyvault`), so builds only contain what their platform needs. See
+`ca-azure-keyvault`, `ca-aws-kms`), so builds only contain what their platform needs. See
 [docs/backends.md](docs/backends.md).
 
 ### Serverless
@@ -132,8 +133,14 @@ right port and configuration source:
 - Configuration: `SSH_CASIGN_CONFIG_TOML` (the whole file's content), else the file.
 - Audit: the `stdout` sink; the service's own log goes to stderr.
 
-Azure Functions: [deploy/azure-functions](deploy/azure-functions/README.md). AWS Lambda
-and Google Cloud Run functions are planned.
+- Azure Functions: [deploy/azure-functions](deploy/azure-functions/README.md) (custom
+  handler).
+- AWS Lambda: [deploy/aws-lambda](deploy/aws-lambda/README.md) (container image with
+  the Lambda Web Adapter).
+- Google Cloud Run functions: planned.
+
+`deploy/build-static.sh` builds the static Linux binaries (musl, rustls) for these,
+cross-compiled with `cargo-zigbuild` for x86-64 or arm64.
 
 ### Signature algorithms
 

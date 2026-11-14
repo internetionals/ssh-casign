@@ -11,17 +11,20 @@ ca-file = ["dep:ssh-casign-ca-file"]
 ca-pkcs11 = ["dep:ssh-casign-ca-pkcs11"]
 ca-vault = ["dep:ssh-casign-ca-vault"]
 ca-azure-keyvault = ["dep:ssh-casign-ca-azure"]
+ca-aws-kms = ["dep:ssh-casign-ca-aws"]
 # TLS for outgoing HTTPS (IdP, Vault, cloud KMS), for all crates: the
 # platform's TLS stack, or rustls (with the OS certificate store and built-in
 # Mozilla roots) for static builds, e.g. for serverless platforms.
 tls-native = [
   "reqwest/native-tls",
+  "ssh-casign-ca-aws?/native-tls",
   "ssh-casign-ca-azure?/native-tls",
   "ssh-casign-ca-vault?/native-tls",
 ]
 tls-rustls = [
   "reqwest/rustls-tls-native-roots",
   "reqwest/rustls-tls-webpki-roots",
+  "ssh-casign-ca-aws?/rustls",
   "ssh-casign-ca-azure?/rustls",
   "ssh-casign-ca-vault?/rustls",
 ]
@@ -35,6 +38,7 @@ toml = "0.8.19"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 
+ssh-casign-ca-aws = { path = "../ssh-casign-ca-aws", optional = true, default-features = false }
 ssh-casign-ca-azure = { path = "../ssh-casign-ca-azure", optional = true, default-features = false }
 ssh-casign-ca-file = { path = "../ssh-casign-ca-file", optional = true }
 ssh-casign-ca-pkcs11 = { path = "../ssh-casign-ca-pkcs11", optional = true }
