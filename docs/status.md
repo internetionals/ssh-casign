@@ -1,7 +1,7 @@
 Project status
 ==============
 
-Snapshot of 2026-11-14 (commit `1d40eaa` plus uncommitted work).
+Snapshot of 2026-11-15 (commit `9c6e7d0`).
 
 Status per area
 ---------------
@@ -10,199 +10,166 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 
 ### Signing service
 
-| Area                                   | State | Notes                                                    |
-|----------------------------------------|:-----:|----------------------------------------------------------|
-| HTTP endpoint `POST /sign`             |  ✅   | axum, JSON in/out, JSON error bodies                     |
-| Discovery endpoint                     |  ✅   | issuer, client ID, scopes, sign endpoint, CA public keys |
-| Bearer token extraction                |  ✅   | `Authenticated` extractor, 401 + `WWW-Authenticate`      |
-| Several issuers                        |  ✅   | `[issuers.<name>]` for machines; routed by `iss`         |
-| JWT validation                         |  ✅   | signature (JWKS), `exp`, `nbf`; `iss` and `aud` required |
-| Claims → profile selection             |  🟡   | issuer, cert type, one `claim == value`; first match     |
-| Certificate policy (defaults + limits) |  ✅   | request → token → profile; both limit; docs/policy.md    |
-| Default user extensions                |  ✅   | ssh-keygen's defaults when no extensions are configured  |
-| CA key backends                        |  ✅   | file, pkcs11, vault, Azure, AWS, GCP                     |
-| Several CAs per profile                |  ✅   | ordered; selected by the client's accepted algorithms    |
-| CA signature algorithms                |  ✅   | Ed25519, ECDSA, rsa-sha2-512/256, ssh-rsa (opt-in)       |
-| Client key type and size limits        |  ✅   | `allowed_key_types`, `min_rsa_bits`, `max_rsa_bits`      |
-| File-based CA provider                 |  ✅   | OpenSSH private key, restricts allowed cert types        |
-| Azure Functions                        |  ✅   | custom handler package in deploy/azure-functions         |
-| AWS Lambda                             |  ✅   | image with Lambda Web Adapter in deploy/aws-lambda       |
-| Google Cloud Run                       |  ✅   | distroless image in deploy/gcp-cloud-run                 |
-| User certificates                      |  ✅   |                                                          |
-| Host certificates                      |  ✅   | machine, admin and orchestrator routes (docs/hosts.md)   |
-| Revocation (KRL)                       |  ✅   | file and API (store) → `/revoked.krl` (docs/revocation)  |
-| Shared storage, issuance index         |  ✅   | optional; file, S3, GCS, Azure Blob                      |
-| Weak key checks                        |  ✅   | ROCA, Fermat, curve points, blocklists, shared keys      |
-| Signed trust statement, pinning        |  ✅   | automatic or offline trust keys, k of n (docs/trust.md)  |
-| Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
-| Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |
-| Behind proxies and CDNs                |  ✅   | `trusted_proxies`, XFF/RFC 7239/CF headers, `CF-Ray`     |
-| Serial numbers                         |  ✅   | random non-zero 64-bit; `{{serial}}` in key ID templates |
-| Config path, listen address            |  ✅   | argument or `SSH_CASIGN_CONFIG`; `listen` in config      |
-| Strict config parsing                  |  ✅   | unknown keys are an error                                |
-| TLS                                    |  ❌   | run behind a TLS-terminating proxy for now               |
-| Tests                                  |  🟡   | unit tests for profile parsing/lookup and the policy     |
+| Area                                   | State | Notes                                                  |
+|----------------------------------------|:-----:|--------------------------------------------------------|
+| HTTP API                               |  ✅   | `/sign`, `/revoke`, `/certificates`, KRL; JSON errors  |
+| Discovery endpoint                     |  ✅   | issuer, endpoints, CA keys, signed trust statement     |
+| Token validation                       |  ✅   | JWKS signature, `exp`, `nbf`; `iss` and `aud` required |
+| Several issuers                        |  ✅   | `[issuers.<name>]` for machines; routed by `iss`       |
+| Claims → profile selection             |  🟡   | issuer, cert type, one `claim == value`; first match   |
+| Certificate policy (defaults + limits) |  ✅   | request → token → profile; both limit (policy.md)      |
+| User certificates                      |  ✅   | ssh-keygen's default extensions                        |
+| Host certificates                      |  ✅   | machine, admin and orchestrator routes (hosts.md)      |
+| Key ID template, serial numbers        |  ✅   | server:profile:oidc id:app name; random 64-bit         |
+| CA key backends                        |  ✅   | file, pkcs11, vault, Azure, AWS, GCP, Barbican         |
+| Backend authentication                 |  ✅   | Vault k8s/JWT/AppRole; AWS, Azure, GCP chains          |
+| Several CAs per profile, algorithms    |  ✅   | selected by accepted algorithms; ssh-rsa opt-in        |
+| Client key limits, weak keys           |  ✅   | types, RSA size, ROCA, Fermat, blocklists              |
+| Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (audit.md)      |
+| Behind proxies and CDNs                |  ✅   | `trusted_proxies`, XFF/RFC 7239/CF headers, `CF-Ray`   |
+| Revocation                             |  ✅   | file and API → signed KRL (revocation.md)              |
+| Shared storage, issuance index         |  ✅   | optional; file, S3, GCS, Azure Blob                    |
+| Signed trust statement, pinning        |  ✅   | automatic or offline trust keys, k of n (trust.md)     |
+| Serverless packages                    |  ✅   | Azure Functions, AWS Lambda, Google Cloud Run          |
+| Config and secrets                     |  ✅   | file or `SSH_CASIGN_CONFIG_TOML`; secrets from files   |
+| TLS termination in the service         |  ❌   | run behind a TLS-terminating proxy for now             |
+| Health endpoint                        |  ❌   | no `/healthz` (discovery works as a probe)             |
+| Automated tests                        |  🟡   | unit tests; end-to-end scripts not in the repository   |
 
 ### Client
 
-| Area                                   | State | Notes                                                    |
-|----------------------------------------|:-----:|----------------------------------------------------------|
-| CLI, `cert` subcommand                 |  ✅   | `-t`, `-o`, key from file or stdin, `<key>-cert.pub`     |
-| Config file + named profiles           |  ✅   | profile = service URL (+ optional overrides)             |
-| `--url` without a config file          |  ✅   |                                                          |
-| Service discovery                      |  ✅   | resolves the relative sign endpoint                      |
-| Sign-in method selection               |  ✅   | CLI/env > profile > config > `device`                    |
-| IdP discovery                          |  ✅   | issuer checked; endpoint for the chosen method required  |
-| Device authorization flow              |  ✅   | RFC 8628; tested against Dex                             |
-| Authorization code flow + PKCE         |  ✅   | loopback redirect on `localhost`; tested against Dex     |
-| Token from environment                 |  ✅   | `SSH_CASIGN_TOKEN`, for testing and automation           |
-| Token caching / refresh                |  ✅   | refresh tokens in keyring/file; `logout` forgets them    |
-| Platforms                              |  ✅   | Linux (tests in a container), macOS, Windows (compiles)  |
-| Sign request with bearer token         |  ✅   | error details from body or `WWW-Authenticate`            |
-| Request certificate values             |  ✅   | validity, principals, extensions, app name, ...          |
-| Add key + certificate to `ssh-agent`   |  ✅   | `login`: in-memory key, or existing key via `ssh-add`    |
-| Reuse still-valid certificates         |  ✅   | same CA, app name, enough validity left; `--new`         |
-| Generate a key pair                    |  ✅   | ephemeral Ed25519 for `login`, never written to disk     |
-| Tests                                  |  🟡   | option precedence, certificate file naming               |
+| Area                                | State | Notes                                                 |
+|-------------------------------------|:-----:|-------------------------------------------------------|
+| `cert`, config file, named profiles |  ✅   | service URL is enough; everything else discovered     |
+| Interactive sign-in                 |  ✅   | device flow and authorization code + PKCE (Dex)       |
+| Machine sign-in                     |  🟡   | client credentials, token file tested; others not run |
+| Refresh token caching, `logout`     |  ✅   | keyring, file or none                                 |
+| `login` with `ssh-agent`            |  ✅   | in-memory Ed25519 key or existing key; reuse          |
+| `host` (host certificate renewal)   |  ✅   | renews when due; `--on-change`                        |
+| `ca-keys`, `krl`, `trust`           |  ✅   | pinned trust statement; files updated on change       |
+| `revoke`, `certificates`            |  ✅   | possession, own certificates, admin search            |
+| Platforms                           |  🟡   | Linux, macOS; Windows compiles but hasn't run         |
 
-### PoC
-
-| Area                                   | State | Notes                                                    |
-|----------------------------------------|:-----:|----------------------------------------------------------|
-| Mock IdP with SSH claims               |  ✅   | mock-oauth2-server, `client_credentials` + `code` hack   |
-| curl-based end-to-end script           |  ✅   |                                                          |
-| Client end to end                      |  ✅   | device flow with Dex; mock tokens via `SSH_CASIGN_TOKEN` |
-| IdP with device flow for testing       |  ✅   | `poc/dex/`, with `approve.sh` for browserless approval   |
-| End to end through `sshd`              |  ✅   | `poc/e2e-login.sh`: login, ssh, expiry, wrong principal  |
-
-Known issues
-------------
-
-Fixed on 2026-11-14: unchecked `aud`/`iss` (including tokens *without* those claims),
-host request panic, missing default extensions, client `.pub` parsing, client argument
-order, unauthenticated client requests, PoC config, silently ignored config keys,
-malformed `WWW-Authenticate`, missing-principals 401 instead of 403, client error output.
-
-Policy defaults and limits were added on 2026-11-14 (see [policy.md](policy.md)).
-
-The workspace is split into a service binary, `ssh-casign-core` (service logic),
-`ssh-casign-ca` (certificates and the backend API) and one crate per backend; see the
-README.
-
-Certificates are now encoded by the service itself (byte-identical to ssh-key, which a
-test checks); backends only sign bytes, and every certificate is verified before it is
-handed out.
-
-Fixed with the signature algorithm work: RSA CAs didn't work at all. ssh-key 0.6.7
-converts RSA keys for the `rsa` crate with the prime `p` twice instead of `p` and `q`,
-which `rsa` 0.9.10 rejects. All RSA signing now uses our own conversion
-(`rsa_private_key` in `ssh-casign-ca/src/encoding.rs`). ssh-key also can't represent
-`ssh-rsa` (SHA-1) signatures, so those certificates are encoded by hand, and the client
-keeps certificates as the bytes it received (`ssh-casign-client/src/certificate.rs`).
-
-Still open, ordered by impact:
-
-1. **No revocation yet.** The audit log has every certificate (and its serial), which is
-   what a KRL (key revocation list) generator needs; generating and distributing one is
-   still to do.
-2. **No proof that the token was meant for this service** when the IdP puts the
-   `client_id` in `aud` for every token issued to that client. Use a dedicated client
-   for ssh-casign, or configure a dedicated `audience`.
-
-Suggestions
+Outstanding
 -----------
 
-### Discovery (done)
+Ordered by impact. "Tested" in the docs means against emulators, mocks or local servers
+unless it says otherwise.
 
-The service publishes the issuer, client ID, scopes, sign endpoint and CA public keys at
-`/.well-known/ssh-casign`, so client configuration reduces to the service URL. A later
-addition could be a hint about which sign-in methods the IdP client allows, so the
-client can pick a working default.
+### 1. Nothing has run against the real services
 
-### Client authentication
+Every cloud and OpenStack integration was built from the providers' documentation and
+tested against emulators or mocks of my own:
 
-- Both flows are done: [auth/device.rs](../ssh-casign-client/src/auth/device.rs) and
-  [auth/authorization_code.rs](../ssh-casign-client/src/auth/authorization_code.rs). The
-  browser flow redirects to `localhost` rather than the `127.0.0.1` that RFC 8252
-  prefers, because Dex (and Azure's registration) need that form. If an IdP requires the
-  IP literal, that could become a client profile option.
-- The client sends the ID token when the IdP returns one, else the access token. Many
-  IdPs issue opaque access tokens, or access tokens without custom claims; the ID token
-  (with `aud = client_id`) is the most portable choice. A JWT access token with a
-  dedicated audience is the cleaner choice where the IdP supports it. Either way, the
-  service checks the audience.
-- Refresh tokens are cached (done; `token_store` in the client config).
-- Non-interactive sign-in is done: `client-credentials`, `token-file`, `gcp-metadata`,
-  `azure-managed-identity` and `github-actions` (docs/hosts.md). The last three haven't
-  run on their platforms yet.
-- Profile selectors match one claim. Several claims at once (GitHub's `repository` and
-  `ref`, say) would make machine profiles tighter; for now `sub` often combines them.
+| Integration                             | Tested against                                      |
+|-----------------------------------------|-----------------------------------------------------|
+| AWS KMS, S3 store, Lambda               | LocalStack 4.0.3, the Lambda RIE; SigV4 vs botocore |
+| Azure Key Vault, Functions              | Lowkey Vault, the Functions host image              |
+| Azure Blob store                        | Azurite 3.35.0, Shared Key only (no Entra ID)       |
+| Google Cloud KMS, Cloud Run, federation | a mock of the REST APIs, STS and IAM credentials    |
+| GCS store                               | fake-gcs-server 1.54.0                              |
+| OpenStack Barbican, Keystone            | a mock of both APIs                                 |
+| Vault/OpenBao Kubernetes auth           | OpenBao 2.1.0 with a stand-in TokenReview API       |
+| Machine sign-in on GCP, Azure, GitHub   | not run at all                                      |
+| EKS Pod Identity                        | a stand-in agent in a unit test                     |
 
-### Claim mapping (done for principals)
+A round of tests on the real platforms (one per cloud is enough to start) is the most
+valuable next step: emulators accept things the real services may not (LocalStack
+doesn't check SigV4 signatures, for example).
 
-Profiles can derive principals from standard claims with templates (see
-[policy.md](policy.md#principal-templates)). The same mechanism could be extended to other
-values, for example a `comment` template, or `matching_*` patterns built from claims.
+### 2. The end-to-end tests aren't in the repository
 
-### Certificate hygiene
+The repository has unit tests (165) and ignored tests that need a server or emulator.
+The end-to-end scripts that drove the service, the client, `sshd`, the IdPs and the
+emulators were written per feature in a scratch directory, and `poc/` is gitignored.
+There is no CI.
 
-- Random 64-bit serial numbers, also available in the key ID template.
-- Set `valid_after` about 60 seconds in the past to tolerate clock skew.
-- Reject weak keys: DSA (the service enables the `dsa` feature) and RSA keys under 3072
-  bits. Allow-list the algorithms you accept.
-- Write an audit log entry for every issuance: subject, principals, serial, key
-  fingerprint, validity, profile.
+- Move the end-to-end scenarios into the repository (a `tests/e2e/` with the mock IdP,
+  Dex, `sshd`, OpenBao and the emulators in containers), runnable with one command.
+- Add CI: fmt, clippy for every feature combination, unit tests on Linux, macOS and
+  Windows, the client's Windows build, and the container-based tests.
+- Keep the mocks (GCP, OpenStack, TokenReview) with them, marked as mocks.
 
-### Client UX
+### 3. Service operations
 
-- `login` is done: in-memory key or existing key, lifetime equal to the certificate, and
-  reuse of a still-valid certificate from the same service and application name.
-- Refresh tokens are cached (keyring, file or none), so a new certificate needs no
-  browser or device code while the IdP session lasts.
-- Reuse doesn't look at *who* the certificate is for: on a shared agent, a second user
-  running `login` would get the first user's certificate. An agent is normally personal,
-  but `login` could check the principals or key ID once it knows the identity.
-- Windows support (named-pipe agent, URL handler for the browser) compiles but hasn't
-  been run on Windows yet. On Linux, the `keyring` store uses the kernel keyring, which
-  doesn't survive a reboot; a Secret Service backend (GNOME Keyring, KWallet) would, but
-  needs D-Bus.
+- **TLS in the service.** It speaks plain HTTP and must run behind a TLS proxy, a tunnel,
+  or a platform front end. TLS for syslog over TCP is missing too.
+- **No `/healthz`.** The discovery endpoint works as a liveness probe, but there is no
+  readiness check of the IdP, the backends and the store.
+- **Rate limiting** on `/sign` and `/revoke` is left to a proxy or CDN.
+- **Clock skew.** `valid_after` is the current time; a server whose clock is a little
+  behind rejects a fresh certificate. Back-dating by about 60 seconds is common.
 
-### Service operations
+### 4. Policy and identity
 
-- CLI/env for the config path and listen address. Return startup errors instead of
-  calling `expect()`.
-- Terminate TLS in the service (`axum-server` + rustls), or document that it must run
-  behind a TLS proxy.
-- `GET /healthz` and request IDs in tracing spans. Rate limiting on `/sign` is left to
-  a proxy or CDN in front (docs/audit.md, "Behind a reverse proxy or CDN").
+- **One claim per profile selector.** Several claims at once (GitHub's `repository`
+  and `ref`, say) would make machine profiles tighter.
+- **Audience.** When an IdP puts the `client_id` in `aud` of every token it issues to that
+  client, the service can't tell a token meant for it from one meant for something else
+  of the same client. Use a dedicated client or a dedicated `audience`.
+- **Default RSA minimum** is 2048 bits; 3072 is the more future-proof default.
+- **Claim templates** only cover principals; comments and `matching_*` patterns built from
+  claims would be the same mechanism.
 
-### Code
+### 5. Backends and credentials
 
-- `CertificateOptions` has public fields and also getters/setters, and the `impl<'a>`
-  lifetime is unnecessary. Choose one style.
-- The `Signer` trait uses `async fn` in a trait without a `Send` bound. That works with
-  the current enum dispatch. If you later want `dyn` providers, add
-  `#[trait_variant::make(Send)]` or return boxed futures.
-- Tests: unit tests for `Profiles::lookup` and `CertificateSettings::apply` exist. Next:
-  an integration test that runs the service against an in-process JWKS or the mock IdP
-  container.
+- **Vault/OpenBao:** cloud IAM logins (the `aws`, `gcp` and `azure` auth methods) are not
+  implemented; Kubernetes, JWT, AppRole and tokens are.
+- **AWS:** SSO and role-chaining profiles aren't supported.
+- **GCP federation:** the AWS and executable credential sources aren't supported; token
+  files and URLs are.
+- **Barbican:** no `clouds.yaml`; configuration and `OS_*` variables only. The key is in
+  memory while the service runs (inherent to Barbican, which doesn't sign).
+- **Key rotation** in Vault, Barbican and the KMS backends needs a service restart (the
+  key or version is fixed at startup, so the advertised key matches the signatures).
 
-Suggested order of work
------------------------
+### 6. Revocation, trust and key checks
 
-1. ~~Small bugs that block end-to-end testing.~~ Done.
-2. ~~Audience/issuer validation, policy defaults and limits.~~ Done.
-3. ~~Shared proto crate + discovery endpoint.~~ Done.
-4. ~~Client: the device flow, then authorization code + PKCE.~~ Done.
-5. ~~`ssh-agent` integration and the `login` command.~~ Done.
-6. ~~Serials, claim templates for principals, durable audit log~~ (done), TLS,
-   integration tests.
-7. ~~Host certificates~~ (done: machines, administrators and orchestrators; all CA
-   backends are done too).
-9. ~~Revocation from a file, served as a KRL; the revoke API with storage backends~~
-   (done, docs/revocation.md). Still to do: Entra ID auth for Azure Blob tested, and
-   the real cloud stores.
-8. ~~Serverless deployment per platform, each with its cloud KMS~~ (done: Azure
-   Functions, AWS Lambda, Google Cloud Run). Done since: Vault/OpenBao Kubernetes,
-   JWT and AppRole logins, GCP workload identity federation, OpenStack Barbican. Still
-   to do: tests against the real cloud services.
+- **Revocation API:** Entra ID authentication for the Azure Blob store is untested.
+  Administrator searches read every unexpired index entry, which is fine for
+  investigations but not for routine use at scale.
+- **`ca-keys`** writes whole files; it can't manage a marked block inside an existing
+  `known_hosts`, and it takes one service URL (servers trusting several independent
+  services need one run per service).
+- **`login`** could keep the `@cert-authority` lines in the user's own `known_hosts` up to
+  date (opt-in).
+- **Weak keys:** not tested with real ROCA keys or Debian's actual blocklist files; there
+  is no import tool for the badkeys project's data.
+- **Host certificates** refuse wildcard principals; whether to allow them (OpenSSH
+  supports them) is undecided.
+
+### 7. Client
+
+- **Windows** support (named-pipe agent, browser launch) compiles but hasn't run on
+  Windows.
+- **Linux keyring:** the kernel keyring doesn't survive a reboot; a Secret Service
+  backend (GNOME Keyring, KWallet) would, but needs D-Bus.
+- **Shared agents:** `login` reuses a certificate from the agent without checking whose
+  it is; on a shared agent a second user could get the first user's certificate.
+- **`login` keys** are Ed25519 only; an RSA option would help with old servers (an RSA
+  key generated in memory).
+- **Loopback redirect** uses `localhost`, not the `127.0.0.1` RFC 8252 prefers (Dex and
+  Azure need `localhost`); a profile option could switch it.
+- **The client enables ssh-key's `dsa` feature,** which it doesn't need.
+- **Discovery** could hint which sign-in methods the IdP client allows.
+
+### 8. Code
+
+- `CertificateOptions` has public fields and also getters and setters. Choose one style.
+
+History
+-------
+
+Fixed or built since the first analysis, in order: audience and issuer checks, policy
+defaults and limits, the discovery endpoint, both interactive sign-in flows,
+`ssh-agent` integration and `login`, serials and claim templates, refresh tokens, the
+audit log, several CAs per profile and CA signature algorithms, the CA backends and
+serverless packages, the crate split, proxy support, host certificates, revocation (file,
+then API with shared storage), the signed trust statement, weak key checks, Vault and
+GCP federation logins, and Barbican.
+
+Two upstream problems are worked around: ssh-key 0.6.7 converts RSA keys for the `rsa`
+crate with the prime `p` twice (the service uses its own conversion,
+`ssh-casign-ca/src/encoding.rs`), and ssh-key can't represent `ssh-rsa` (SHA-1)
+signatures (those certificates are encoded by hand, and the client keeps certificates
+as the bytes it received).
