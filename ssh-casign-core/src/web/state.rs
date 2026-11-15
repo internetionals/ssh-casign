@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use ssh_casign_ca::{Authorities as SshCaProviders, Registry};
+use ssh_casign_store::Store;
 
 pub(super) struct AppState {
     pub(super) config: Config,
@@ -15,12 +16,15 @@ pub(super) struct AppState {
     pub(super) revocations: Arc<crate::revocation::Revocations>,
     /// Client address and correlation ID behind proxies.
     pub(super) origin: crate::proxy::Resolver,
+    /// The store, when the issuance index is on.
+    pub(super) index: Option<Arc<dyn Store>>,
 }
 
 impl AppState {
     pub(super) async fn new(
         config: Config,
         registry: &Registry,
+        stores: &ssh_casign_store::Registry,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let server_id = config.server_id()?;
         tracing::info!("server_id {server_id}");
@@ -29,8 +33,39 @@ impl AppState {
         config.profiles.check(&issuers, &authorities)?;
         let trust = crate::trust::Trust::start(config.trust.as_ref(), &authorities).await?;
         super::discovery::document(&config, &authorities, trust.current())?;
-        let revocations =
-            crate::revocation::Revocations::start(config.revocation.as_ref(), &authorities).await?;
+        let store: Option<Arc<dyn Store>> = match &config.store {
+            Some(table) => {
+                let store = stores.load(table.clone()).await?;
+                tracing::info!("store: {}", store.describe());
+                Some(Arc::from(store))
+            }
+            None => None,
+        };
+        let index = match (config.revocation.as_ref().and_then(|r| r.index), &store) {
+            (Some(true), None) => {
+                return Err("revocation.index needs a [store]".into());
+            }
+            (Some(false), _) | (None, None) => None,
+            (_, Some(store)) => Some(store.clone()),
+        };
+        if let Some(revocation) = &config.revocation {
+            for admin in &revocation.admins {
+                if !issuers.contains(admin.issuer()) {
+                    return Err(
+                        format!("revocation.admins: unknown issuer '{}'", admin.issuer()).into(),
+                    );
+                }
+            }
+            if !revocation.admins.is_empty() && store.is_none() {
+                tracing::warn!("revocation.admins without a [store]: the revocation API is off");
+            }
+        }
+        let revocations = crate::revocation::Revocations::start(
+            config.revocation.as_ref(),
+            &authorities,
+            store.clone(),
+        )
+        .await?;
         let audit = match &config.audit {
             Some(audit) => Some(audit.open(&server_id)?),
             None => {
@@ -51,6 +86,7 @@ impl AppState {
             audit,
             origin,
             revocations,
+            index,
         }))
     }
 }

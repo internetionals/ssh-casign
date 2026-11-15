@@ -7,7 +7,7 @@
 # SSH_CASIGN_CONFIG_TOML app setting).
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BINARY="$("$HERE/../build-static.sh" x86_64 "ca-azure-keyvault${1:+,$1}")"
+BINARY="$("$HERE/../build-static.sh" x86_64 "ca-azure-keyvault,store-azure-blob${1:+,$1}")"
 
 DIST="$HERE/dist"
 rm -rf "$DIST/package"

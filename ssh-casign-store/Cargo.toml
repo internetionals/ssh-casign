@@ -1,0 +1,15 @@
+[package]
+name = "ssh-casign-store"
+version = "0.1.0"
+edition = "2021"
+description = "Shared storage for ssh-casign (revocations, issuance index), with pluggable backends"
+
+[dependencies]
+serde = { version = "1.0.214", features = ["derive"] }
+sha2 = "0.10.9"
+thiserror = "2.0.3"
+tokio = { version = "1.41.1", features = ["fs", "rt", "sync"] }
+toml = "0.8.19"
+
+[dev-dependencies]
+tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread"] }

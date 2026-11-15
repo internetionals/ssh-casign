@@ -20,6 +20,7 @@ use ssh_key::public::{EcdsaPublicKey, KeyData, RsaPublicKey};
 
 use ssh_casign_ca::{encoding, Backend, BackendError, BoxFuture, SignatureAlgorithm};
 
+pub mod blob;
 pub mod credential;
 use credential::{Credential, CredentialConfig};
 

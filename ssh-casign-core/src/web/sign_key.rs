@@ -146,22 +146,36 @@ pub(super) async fn sign_key(
     };
 
     let response = match result {
-        Ok(issued) => match record_issued(&state, &requester, &issued).await {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(SignedKeyResponse {
-                    certificate: issued.openssh,
-                }),
-            )
-                .into_response(),
+        Ok(issued) => match record_index(&state, &auth, &requester, &issued).await {
             Err(err) => {
-                // Fail closed: no certificate without its audit record.
-                tracing::error!(request_id, "audit log failed, certificate withheld: {err}");
+                // Fail closed: without its index entry, the owner couldn't
+                // find (and revoke) the certificate.
+                tracing::error!(
+                    request_id,
+                    "issuance index failed, certificate withheld: {err}"
+                );
                 failure_response(&Failure::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "Audit log unavailable",
+                    "Issuance index unavailable",
                 ))
             }
+            Ok(()) => match record_issued(&state, &requester, &issued).await {
+                Ok(()) => (
+                    StatusCode::OK,
+                    Json(SignedKeyResponse {
+                        certificate: issued.openssh,
+                    }),
+                )
+                    .into_response(),
+                Err(err) => {
+                    // Fail closed: no certificate without its audit record.
+                    tracing::error!(request_id, "audit log failed, certificate withheld: {err}");
+                    failure_response(&Failure::new(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Audit log unavailable",
+                    ))
+                }
+            },
         },
         Err(failure) => {
             log_failure(&request_id, &failure);
@@ -310,6 +324,41 @@ async fn issue(
         key_type,
         signature_algorithm: algorithm.to_string(),
     })
+}
+
+/// Record the certificate in the issuance index, when it is on.
+async fn record_index(
+    state: &super::state::AppState,
+    auth: &super::oidc::Authenticated,
+    requester: &audit::Requester<'_>,
+    issued: &Certificate,
+) -> Result<(), ssh_casign_store::StoreError> {
+    let Some(store) = &state.index else {
+        return Ok(());
+    };
+    let certificate = &issued.certificate;
+    let entry = ssh_casign_proto::revoke::IssuedCertificate {
+        serial: certificate.serial().to_string(),
+        authority: issued.authority.clone(),
+        key_id: certificate.key_id().to_string(),
+        cert_type: match certificate.cert_type() {
+            ssh_key::certificate::CertType::Host => CertType::Host,
+            ssh_key::certificate::CertType::User => CertType::User,
+        },
+        principals: certificate.valid_principals().to_vec(),
+        valid_after: certificate.valid_after(),
+        valid_before: certificate.valid_before(),
+        fingerprint: issued.fingerprint.clone(),
+        profile: requester.profile.unwrap_or_default().to_string(),
+        app_name: requester.app_name.map(str::to_string),
+        client_address: Some(requester.client_ip.to_string()),
+        owner: ssh_casign_proto::revoke::Owner {
+            issuer: auth.issuer.issuer.clone(),
+            id: requester.oidc_id.unwrap_or_default().to_string(),
+        },
+        revoked: false,
+    };
+    crate::index::record(store.as_ref(), &entry).await
 }
 
 async fn record_issued(

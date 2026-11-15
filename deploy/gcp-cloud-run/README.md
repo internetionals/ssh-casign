@@ -19,7 +19,7 @@ CONFIG=path/to/config.toml deploy/gcp-cloud-run/build.sh
 
 - `ARCH=x86_64` (default) or `ARCH=arm64` (for local testing); `IMAGE=name:tag`.
 - The binary is static (musl, rustls, built-in CA roots), built by
-  `deploy/build-static.sh`. Features: `ca-gcp-kms,tls-rustls`; extra features can be
+  `deploy/build-static.sh`. Features: `ca-gcp-kms,store-gcs,tls-rustls`; extra features can be
   passed as the first argument.
 - The image is `gcr.io/distroless/static-debian12:nonroot` with the binary and
   `/etc/ssh-casign/config.toml` (`CONFIG`), running as a non-root user. Without
@@ -100,6 +100,14 @@ type = "stdout"
   `X-Forwarded-For` (as observed; Google doesn't document Cloud Run's format
   explicitly). Behind an external Application Load Balancer the header ends with
   `<client>,<load balancer>`, so set `client_address_skip = 1` there.
+
+Revocation API (optional)
+-------------------------
+
+With a Cloud Storage bucket (`[store] type = "gcs"`, `bucket = "..."`), revocations
+go through the service and every issued certificate is indexed (see
+[docs/revocation.md](../../docs/revocation.md)). Grant the service account
+`roles/storage.objectUser` on the bucket, and add a lifecycle rule for `issued/`.
 
 Audit log
 ---------

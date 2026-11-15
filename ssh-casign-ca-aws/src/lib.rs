@@ -30,6 +30,7 @@ use ssh_casign_ca::{encoding, Backend, BackendError, BoxFuture, SignatureAlgorit
 use ssh_key::public::{EcdsaPublicKey, Ed25519PublicKey, KeyData, RsaPublicKey};
 
 mod credentials;
+pub mod s3;
 mod sigv4;
 mod time;
 
@@ -65,7 +66,7 @@ struct Config {
     ca_cert_file: Option<PathBuf>,
 }
 
-fn env(name: &str) -> Option<String> {
+pub(crate) fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 

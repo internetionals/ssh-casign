@@ -2302,6 +2302,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ssh-casign-ca",
+ "ssh-casign-store",
  "ssh-key",
  "tokio",
  "toml",
@@ -2313,11 +2314,15 @@ name = "ssh-casign-ca-azure"
 version = "0.1.0"
 dependencies = [
  "base64ct",
+ "hmac",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "ssh-casign-ca",
+ "ssh-casign-store",
  "ssh-key",
+ "tokio",
  "toml",
 ]
 
@@ -2352,6 +2357,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "ssh-casign-ca",
+ "ssh-casign-store",
  "ssh-key",
  "tokio",
  "toml",
@@ -2429,6 +2435,7 @@ dependencies = [
  "sha2",
  "ssh-casign-ca",
  "ssh-casign-proto",
+ "ssh-casign-store",
  "ssh-key",
  "thiserror 2.0.21",
  "tokio",
@@ -2463,6 +2470,17 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ssh-casign-store"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "sha2",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

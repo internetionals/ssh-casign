@@ -11,9 +11,11 @@
 //! | `key_id` (+ `authority`)    | certificates with that key ID (from every authority)  |
 //! | `fingerprint`/`public_key`  | a key, with every certificate for it                  |
 //!
-//! Entries come from a [`Source`]: today the revocation file and inline
-//! entries in the config; a storage backend with a revoke API can implement
-//! the same trait later.
+//! Entries come from the revocation file, inline entries in the config, and
+//! the revocations document in the store (`revocations.json`), which the
+//! revoke API updates with compare-and-swap writes. Every instance reloads
+//! them every `reload_interval`; the instance that took a revocation applies
+//! it at once.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,9 +25,14 @@ use std::{
 };
 
 use base64ct::{Base64Unpadded, Encoding as _};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Digest as _;
 use ssh_casign_ca::Authorities;
+use ssh_casign_proto::revoke::RevokedEntry;
+use ssh_casign_store::{BoxFuture, Precondition, Store, StoreError};
+
+/// The revocations document in the store.
+pub(crate) const STORE_KEY: &str = "revocations.json";
 
 /// KRL format (OpenSSH PROTOCOL.krl).
 const KRL_MAGIC: &[u8; 8] = b"SSHKRL\n\0";
@@ -48,9 +55,60 @@ pub(crate) struct Config {
     /// Entries in the config itself (e.g. for `SSH_CASIGN_CONFIG_TOML`).
     #[serde(default)]
     revoked: Vec<RawEntry>,
-    /// How often to check the file for changes, in seconds (0: never).
+    /// How often to check the file and the store for changes, in seconds
+    /// (0: never).
     #[serde(default = "default_reload_interval")]
     reload_interval: u64,
+    /// Who may revoke anything through the API.
+    #[serde(default)]
+    pub(crate) admins: Vec<AdminSelector>,
+    /// Record every issued certificate in the store (the issuance index), so
+    /// users can revoke their own. Default: true when a store is configured.
+    pub(crate) index: Option<bool>,
+}
+
+/// An administrator: tokens of `issuer` (default `oidc_provider`) whose
+/// claim `claim` is (or contains) `value`.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AdminSelector {
+    issuer: Option<String>,
+    claim: String,
+    value: String,
+}
+
+impl AdminSelector {
+    pub(crate) fn issuer(&self) -> &str {
+        self.issuer
+            .as_deref()
+            .unwrap_or(crate::web::oidc::PRIMARY_ISSUER)
+    }
+
+    pub(crate) fn matches(
+        &self,
+        issuer: &str,
+        claims: &crate::certificate::profiles::TokenClaims,
+    ) -> bool {
+        if issuer != self.issuer() {
+            return false;
+        }
+        match crate::certificate::template::claim(claims, &self.claim) {
+            Some(serde_json::Value::String(value)) => *value == self.value,
+            Some(serde_json::Value::Array(values)) => values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|value| value == self.value),
+            _ => false,
+        }
+    }
+}
+
+/// The revocations document in the store.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Document {
+    #[serde(default)]
+    pub(crate) revoked: Vec<RevokedEntry>,
 }
 
 /// One revocation as written in the file.
@@ -95,6 +153,29 @@ pub(crate) struct RawEntry {
     revoked_by: Option<String>,
 }
 
+impl RawEntry {
+    fn from_stored(entry: &RevokedEntry) -> Result<Self, String> {
+        Ok(Self {
+            serial: entry
+                .serial
+                .as_deref()
+                .map(|serial| {
+                    serial
+                        .parse()
+                        .map_err(|_| format!("serial '{serial}' is not a 64-bit unsigned number"))
+                })
+                .transpose()?,
+            key_id: entry.key_id.clone(),
+            fingerprint: entry.fingerprint.clone(),
+            public_key: None,
+            authority: entry.authority.clone(),
+            reason: entry.reason.clone(),
+            revoked_at: Some(toml::Value::Integer(entry.revoked_at as i64)),
+            revoked_by: Some(entry.revoked_by.clone()),
+        })
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawFile {
@@ -113,8 +194,8 @@ pub(crate) struct Loaded {
 pub(crate) trait Source: Send + Sync {
     fn describe(&self) -> String;
     /// A cheap version check: changes whenever the entries may have.
-    fn version(&self) -> Result<u64, String>;
-    fn load(&self) -> Result<Loaded, String>;
+    fn version(&self) -> BoxFuture<'_, Result<u64, String>>;
+    fn load(&self) -> BoxFuture<'_, Result<Loaded, String>>;
 }
 
 /// The revocation file plus inline entries.
@@ -131,7 +212,7 @@ fn unix_secs(time: SystemTime) -> u64 {
         .unwrap_or_default()
 }
 
-impl Source for FileSource {
+impl FileSource {
     fn describe(&self) -> String {
         match &self.file {
             Some(file) => format!("revocation file {}", file.display()),
@@ -145,6 +226,7 @@ impl Source for FileSource {
                 .and_then(|metadata| metadata.modified())
                 .map(|modified| unix_secs(modified).max(1))
                 .map_err(|err| format!("{}: {err}", file.display())),
+            None if self.inline.is_empty() => Ok(0),
             None => Ok(self.started),
         }
     }
@@ -170,14 +252,104 @@ impl Source for FileSource {
     }
 }
 
+fn hash_u64(text: &str) -> u64 {
+    let digest = sha2::Sha256::digest(text.as_bytes());
+    u64::from_be_bytes(digest[..8].try_into().expect("8 bytes"))
+}
+
+/// The revocations document in the store.
+struct StoreSource {
+    store: Arc<dyn Store>,
+}
+
+impl StoreSource {
+    async fn version(&self) -> Result<u64, String> {
+        let object = self
+            .store
+            .get(STORE_KEY)
+            .await
+            .map_err(|err| format!("{}: {err}", self.store.describe()))?;
+        Ok(object.map(|object| hash_u64(&object.version)).unwrap_or(0))
+    }
+
+    async fn load(&self) -> Result<Loaded, String> {
+        let describe = |err: &dyn std::fmt::Display| format!("{}: {err}", self.store.describe());
+        let Some(object) = self
+            .store
+            .get(STORE_KEY)
+            .await
+            .map_err(|err| describe(&err))?
+        else {
+            return Ok(Loaded {
+                entries: Vec::new(),
+                changed: 0,
+            });
+        };
+        let document: Document =
+            serde_json::from_slice(&object.data).map_err(|err| describe(&err))?;
+        // The KRL's version and date: the newest revocation, the same on
+        // every instance.
+        let changed = document
+            .revoked
+            .iter()
+            .map(|entry| entry.revoked_at)
+            .max()
+            .unwrap_or(0);
+        let entries = document
+            .revoked
+            .iter()
+            .map(RawEntry::from_stored)
+            .collect::<Result<_, _>>()
+            .map_err(|err| describe(&err))?;
+        Ok(Loaded { entries, changed })
+    }
+}
+
+/// The file (and inline entries) plus the store.
+struct Sources {
+    file: FileSource,
+    store: Option<StoreSource>,
+}
+
+impl Source for Sources {
+    fn describe(&self) -> String {
+        match &self.store {
+            Some(store) => format!("{} and {}", self.file.describe(), store.store.describe()),
+            None => self.file.describe(),
+        }
+    }
+
+    fn version(&self) -> BoxFuture<'_, Result<u64, String>> {
+        Box::pin(async move {
+            let file = self.file.version()?;
+            let store = match &self.store {
+                Some(store) => store.version().await?,
+                None => 0,
+            };
+            Ok(hash_u64(&format!("{file}/{store}")))
+        })
+    }
+
+    fn load(&self) -> BoxFuture<'_, Result<Loaded, String>> {
+        Box::pin(async move {
+            let mut loaded = self.file.load()?;
+            if let Some(store) = &self.store {
+                let stored = store.load().await?;
+                loaded.entries.extend(stored.entries);
+                loaded.changed = loaded.changed.max(stored.changed);
+            }
+            Ok(loaded)
+        })
+    }
+}
+
 /// Validated revocations and the KRL built from them.
 pub(crate) struct Snapshot {
-    changed: u64,
     count: usize,
     /// Revoked keys: SHA-256 of the public key blob.
     fingerprints: BTreeSet<[u8; 32]>,
-    /// Per authority: revoked key IDs. (Revoked serials are only in the KRL:
-    /// new serials are random, so they don't collide with them.)
+    /// Per authority: revoked serials and key IDs.
+    serials: BTreeMap<String, BTreeSet<u64>>,
     key_ids: BTreeMap<String, BTreeSet<String>>,
     krl: Arc<[u8]>,
     etag: String,
@@ -300,9 +472,9 @@ impl Snapshot {
                 .collect::<String>()
         );
         Ok(Self {
-            changed: loaded.changed,
             count: loaded.entries.len(),
             fingerprints,
+            serials,
             key_ids,
             krl: krl.into(),
             etag,
@@ -312,6 +484,37 @@ impl Snapshot {
 
     pub(crate) fn key_revoked(&self, key: &ssh_key::PublicKey) -> bool {
         key_hash(key).is_ok_and(|hash| self.fingerprints.contains(&hash))
+    }
+
+    pub(crate) fn serial_revoked(&self, authority: &str, serial: u64) -> bool {
+        self.serials
+            .get(authority)
+            .is_some_and(|serials| serials.contains(&serial))
+    }
+
+    pub(crate) fn fingerprint_revoked(&self, fingerprint: &str) -> bool {
+        parse_fingerprint(fingerprint).is_ok_and(|hash| self.fingerprints.contains(&hash))
+    }
+
+    /// The target of `entry` is already revoked.
+    fn covers(&self, entry: &RevokedEntry, authorities: &Authorities) -> bool {
+        if let (Some(serial), Some(authority)) = (&entry.serial, &entry.authority) {
+            return serial
+                .parse()
+                .is_ok_and(|serial| self.serial_revoked(authority, serial));
+        }
+        if let Some(key_id) = &entry.key_id {
+            return match &entry.authority {
+                Some(authority) => self.key_id_revoked(authority, key_id),
+                None => authorities
+                    .keys()
+                    .all(|authority| self.key_id_revoked(authority, key_id)),
+            };
+        }
+        if let Some(fingerprint) = &entry.fingerprint {
+            return self.fingerprint_revoked(fingerprint);
+        }
+        false
     }
 
     pub(crate) fn key_id_revoked(&self, authority: &str, key_id: &str) -> bool {
@@ -412,12 +615,25 @@ async fn build_signed(loaded: Loaded, authorities: &Authorities) -> Result<Snaps
     Ok(snapshot)
 }
 
-/// The current revocations, reloaded from the source in the background.
+/// Why a revocation through the API failed.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RevokeError {
+    #[error("the revocation API needs a [store]")]
+    NoStore,
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Store(String),
+}
+
+/// The current revocations, reloaded from the sources in the background.
 pub(crate) struct Revocations {
     current: RwLock<Arc<Snapshot>>,
     /// The last version tried (loaded or not) and the last error, so a
     /// broken file is reported once rather than on every check.
     tried: tokio::sync::Mutex<(u64, Option<String>)>,
+    source: Sources,
+    authorities: Authorities,
 }
 
 impl Revocations {
@@ -426,17 +642,23 @@ impl Revocations {
     pub(crate) async fn start(
         config: Option<&Config>,
         authorities: &Authorities,
+        store: Option<Arc<dyn Store>>,
     ) -> Result<Arc<Self>, String> {
         let default = Config::default();
         let config = config.unwrap_or(&default);
-        let source: Arc<dyn Source> = Arc::new(FileSource {
-            file: config.file.clone(),
-            inline: config.revoked.clone(),
-            started: unix_secs(SystemTime::now()),
-        });
-        let loaded = source.load()?;
+        let has_store = store.is_some();
+        let source = Sources {
+            file: FileSource {
+                file: config.file.clone(),
+                inline: config.revoked.clone(),
+                started: unix_secs(SystemTime::now()),
+            },
+            store: store.map(|store| StoreSource { store }),
+        };
+        let version = source.version().await?;
+        let loaded = source.load().await?;
         let snapshot = build_signed(loaded, authorities).await?;
-        if snapshot.count > 0 || config.file.is_some() {
+        if snapshot.count > 0 || config.file.is_some() || has_store {
             tracing::info!(
                 "{} revocation(s) from {}",
                 snapshot.count,
@@ -444,12 +666,13 @@ impl Revocations {
             );
         }
         let revocations = Arc::new(Self {
-            tried: tokio::sync::Mutex::new((snapshot.changed, None)),
+            tried: tokio::sync::Mutex::new((version, None)),
             current: RwLock::new(Arc::new(snapshot)),
+            source,
+            authorities: authorities.clone(),
         });
-        if config.file.is_some() && config.reload_interval > 0 {
+        if (config.file.is_some() || has_store) && config.reload_interval > 0 {
             let interval = Duration::from_secs(config.reload_interval);
-            let authorities = authorities.clone();
             let weak = Arc::downgrade(&revocations);
             tokio::spawn(async move {
                 let mut timer = tokio::time::interval(interval);
@@ -459,24 +682,24 @@ impl Revocations {
                     let Some(revocations) = weak.upgrade() else {
                         return;
                     };
-                    revocations.reload(source.as_ref(), &authorities).await;
+                    revocations.reload().await;
                 }
             });
         }
         Ok(revocations)
     }
 
-    /// Reload from `source` if it changed. A broken list keeps the previous
-    /// one: new revocations then don't apply until it's fixed, so this logs
-    /// an error.
-    async fn reload(&self, source: &dyn Source, authorities: &Authorities) {
+    /// Reload if the sources changed. A broken list keeps the previous one:
+    /// new revocations then don't apply until it's fixed, so this logs an
+    /// error (once).
+    pub(crate) async fn reload(&self) {
         let mut tried = self.tried.lock().await;
-        let result = match source.version() {
+        let result = match self.source.version().await {
             Ok(version) if version == tried.0 => Ok(None),
             Ok(version) => {
                 tried.0 = version;
-                match source.load() {
-                    Ok(loaded) => build_signed(loaded, authorities).await.map(Some),
+                match self.source.load().await {
+                    Ok(loaded) => build_signed(loaded, &self.authorities).await.map(Some),
                     Err(err) => Err(err),
                 }
             }
@@ -487,7 +710,7 @@ impl Revocations {
                 tracing::info!(
                     "reloaded {} revocation(s) from {}",
                     snapshot.count,
-                    source.describe()
+                    self.source.describe()
                 );
                 *self.current.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(snapshot);
                 tried.1 = None;
@@ -506,6 +729,87 @@ impl Revocations {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    pub(crate) fn has_store(&self) -> bool {
+        self.source.store.is_some()
+    }
+
+    /// Add `entries` to the revocations document in the store (those not
+    /// revoked yet), with compare-and-swap writes; then apply them at once.
+    /// Returns the newly revoked entries and how many were revoked already.
+    pub(crate) async fn revoke(
+        &self,
+        entries: Vec<RevokedEntry>,
+    ) -> Result<(Vec<RevokedEntry>, usize), RevokeError> {
+        let store = &self
+            .source
+            .store
+            .as_ref()
+            .ok_or(RevokeError::NoStore)?
+            .store;
+        // Validate the new entries like the file's (known authorities,
+        // well-formed fingerprints) before writing anything.
+        let raw = entries
+            .iter()
+            .map(RawEntry::from_stored)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(RevokeError::Invalid)?;
+        Snapshot::build(
+            Loaded {
+                entries: raw,
+                changed: 0,
+            },
+            &self.authorities,
+        )
+        .map_err(|err| RevokeError::Invalid(err.replace("revocation ", "target ")))?;
+        let failed = |err: StoreError| RevokeError::Store(format!("{}: {err}", store.describe()));
+        for _ in 0..10 {
+            let current = self.current();
+            let object = store.get(STORE_KEY).await.map_err(failed)?;
+            let (mut document, precondition) = match object {
+                Some(object) => (
+                    serde_json::from_slice::<Document>(&object.data)
+                        .map_err(|err| RevokeError::Store(format!("{STORE_KEY}: {err}")))?,
+                    Precondition::Version(object.version),
+                ),
+                None => (Document::default(), Precondition::Absent),
+            };
+            let mut added = Vec::new();
+            let mut already = 0;
+            for entry in &entries {
+                let known = document
+                    .revoked
+                    .iter()
+                    .any(|known| known.same_target(entry))
+                    || added
+                        .iter()
+                        .any(|known: &RevokedEntry| known.same_target(entry))
+                    || current.covers(entry, &self.authorities);
+                if known {
+                    already += 1;
+                } else {
+                    document.revoked.push(entry.clone());
+                    added.push(entry.clone());
+                }
+            }
+            if added.is_empty() {
+                return Ok((added, already));
+            }
+            let data = serde_json::to_vec_pretty(&document)
+                .map_err(|err| RevokeError::Store(err.to_string()))?;
+            match store.put(STORE_KEY, data, precondition).await {
+                Ok(_) => {
+                    self.reload().await;
+                    return Ok((added, already));
+                }
+                Err(StoreError::Conflict) => continue,
+                Err(err) => return Err(failed(err)),
+            }
+        }
+        Err(RevokeError::Store(
+            "the revocations document kept changing; try again".into(),
+        ))
     }
 }
 
@@ -581,14 +885,9 @@ mod tests {
         ))
         .unwrap();
         let authorities = authorities();
-        let revocations = Revocations::start(Some(&config), &authorities)
+        let revocations = Revocations::start(Some(&config), &authorities, None)
             .await
             .unwrap();
-        let source = FileSource {
-            file: Some(file.clone()),
-            inline: vec![],
-            started: 0,
-        };
         let set_mtime = |secs: u64| {
             std::fs::File::options()
                 .write(true)
@@ -599,18 +898,18 @@ mod tests {
         };
         std::fs::write(&file, "[[revoked]]\nkey_id = \"x\"\n").unwrap();
         set_mtime(2_000_000_000);
-        revocations.reload(&source, &authorities).await;
+        revocations.reload().await;
         assert!(revocations.current().key_id_revoked("hosts", "x"));
         // Broken: the previous list stays, the error is remembered.
         std::fs::write(&file, "[[revoked]]\nserail = 1\n").unwrap();
         set_mtime(2_000_000_100);
-        revocations.reload(&source, &authorities).await;
+        revocations.reload().await;
         assert!(revocations.current().key_id_revoked("hosts", "x"));
         assert!(revocations.tried.lock().await.1.is_some());
         // Fixed: reloaded.
         std::fs::write(&file, "[[revoked]]\nkey_id = \"y\"\n").unwrap();
         set_mtime(2_000_000_200);
-        revocations.reload(&source, &authorities).await;
+        revocations.reload().await;
         assert!(revocations.current().key_id_revoked("hosts", "y"));
         assert!(!revocations.current().key_id_revoked("hosts", "x"));
         assert!(revocations.tried.lock().await.1.is_none());

@@ -196,6 +196,29 @@ pub(super) fn stored_token(target: &super::Target, service: &discovery::Service)
     )
 }
 
+/// How to sign in at the service's IdP (or the profile's machine method).
+pub(super) fn sign_in_request<'a>(
+    target: &'a super::Target,
+    service: &'a discovery::Service,
+) -> auth::SignInRequest<'a> {
+    let issuer = target.issuer.as_ref().unwrap_or(&service.info.issuer);
+    auth::SignInRequest {
+        method: target.sign_in,
+        issuer,
+        client_id: target.client_id.as_ref().unwrap_or(&service.info.client_id),
+        scopes: target.scopes.as_ref().unwrap_or(&service.info.scopes),
+        machine: auth::machine::MachineSettings {
+            issuer,
+            client_id: target.client_id.as_deref(),
+            client_secret_file: target.client_secret_file.as_deref(),
+            // The service's scopes are for people signing in.
+            scopes: target.scopes.as_deref(),
+            audience: target.audience.as_deref(),
+            token_file: target.token_file.as_deref(),
+        },
+    }
+}
+
 /// Discover the service, sign in and request the certificate.
 ///
 /// If the service rejects a token obtained with a cached refresh token, the
@@ -217,22 +240,7 @@ pub(super) fn obtain_certificates(
         let http = reqwest::Client::new();
         let service = discovery::discover(&http, &target.url).await?;
         let stored = stored_token(target, &service);
-        let issuer = target.issuer.as_ref().unwrap_or(&service.info.issuer);
-        let request = auth::SignInRequest {
-            method: target.sign_in,
-            issuer,
-            client_id: target.client_id.as_ref().unwrap_or(&service.info.client_id),
-            scopes: target.scopes.as_ref().unwrap_or(&service.info.scopes),
-            machine: auth::machine::MachineSettings {
-                issuer,
-                client_id: target.client_id.as_deref(),
-                client_secret_file: target.client_secret_file.as_deref(),
-                // The service's scopes are for people signing in.
-                scopes: target.scopes.as_deref(),
-                audience: target.audience.as_deref(),
-                token_file: target.token_file.as_deref(),
-            },
-        };
+        let request = sign_in_request(target, &service);
         let (mut token, source) = auth::sign_in(&http, &request, &stored, true).await?;
         let mut certificates = Vec::with_capacity(sign_key_requests.len());
         let mut retried = false;

@@ -9,6 +9,7 @@ mod krl;
 mod login;
 mod logout;
 mod request;
+mod revoke;
 mod trust;
 
 pub(crate) use host::write_atomically;
@@ -34,6 +35,10 @@ enum Cmd {
     Krl(krl::Args),
     /// Pin the service's signed trust statement, and sign statements offline
     Trust(trust::Args),
+    /// Revoke certificates or keys through the service
+    Revoke(revoke::RevokeArgs),
+    /// List your unexpired certificates (administrators: search everyone's)
+    Certificates(revoke::CertificatesArgs),
 }
 
 #[derive(Parser)]
@@ -136,6 +141,8 @@ pub(crate) fn run_with_config(args: &Args, config: &Config) -> CmdResult {
         Cmd::CaKeys(ca_keys_args) => ca_keys::run(ca_keys_args, &target),
         Cmd::Krl(krl_args) => krl::run(krl_args, &target),
         Cmd::Trust(trust_args) => trust::run(trust_args, &target),
+        Cmd::Revoke(revoke_args) => revoke::revoke(revoke_args, &target),
+        Cmd::Certificates(certificates_args) => revoke::certificates(certificates_args, &target),
     }
 }
 

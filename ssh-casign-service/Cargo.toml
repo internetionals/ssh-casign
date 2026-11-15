@@ -13,6 +13,11 @@ ca-vault = ["dep:ssh-casign-ca-vault"]
 ca-azure-keyvault = ["dep:ssh-casign-ca-azure"]
 ca-aws-kms = ["dep:ssh-casign-ca-aws"]
 ca-gcp-kms = ["dep:ssh-casign-ca-gcp"]
+# Shared storage for the revocation API and the issuance index (the file
+# store is always included).
+store-s3 = ["dep:ssh-casign-ca-aws"]
+store-gcs = ["dep:ssh-casign-ca-gcp"]
+store-azure-blob = ["dep:ssh-casign-ca-azure"]
 # TLS for outgoing HTTPS (IdP, Vault, cloud KMS), for all crates: the
 # platform's TLS stack, or rustls (with the OS certificate store and built-in
 # Mozilla roots) for static builds, e.g. for serverless platforms.

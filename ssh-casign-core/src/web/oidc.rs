@@ -281,21 +281,50 @@ where
             .await
             .map_err(|err| AuthError::InvalidToken(err.to_string()))?;
         let state = Arc::<AppState>::from_ref(state);
-        let (issuer, claims) = state
-            .issuers
-            .validate(bearer.token())
-            .await
-            .map_err(AuthError::InvalidToken)?;
-        Ok(Authenticated {
-            issuer: IssuerRef {
-                name: issuer.name.clone(),
-                issuer: issuer.issuer.clone(),
-                id_claim: issuer.id_claim.clone(),
-                token_policy: issuer.token_policy,
-            },
-            claims,
-        })
+        authenticate(&state, bearer.token()).await
     }
+}
+
+/// Validate a bearer token with the trusted issuers.
+pub(super) async fn authenticate(
+    state: &AppState,
+    token: &str,
+) -> Result<Authenticated, AuthError> {
+    let (issuer, claims) = state
+        .issuers
+        .validate(token)
+        .await
+        .map_err(AuthError::InvalidToken)?;
+    Ok(Authenticated {
+        issuer: IssuerRef {
+            name: issuer.name.clone(),
+            issuer: issuer.issuer.clone(),
+            id_claim: issuer.id_claim.clone(),
+            token_policy: issuer.token_policy,
+        },
+        claims,
+    })
+}
+
+/// The bearer token in `headers`, validated; `None` without an
+/// `Authorization` header.
+pub(super) async fn optional_authentication(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Option<Authenticated>, AuthError> {
+    let Some(value) = headers.get(header::AUTHORIZATION) else {
+        return Ok(None);
+    };
+    let token = value
+        .to_str()
+        .ok()
+        .and_then(|value| {
+            value
+                .strip_prefix("Bearer ")
+                .or_else(|| value.strip_prefix("bearer "))
+        })
+        .ok_or_else(|| AuthError::InvalidToken("expected a Bearer token".into()))?;
+    authenticate(state, token.trim()).await.map(Some)
 }
 
 #[cfg(test)]

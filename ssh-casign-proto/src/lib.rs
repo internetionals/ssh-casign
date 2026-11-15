@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod revoke;
 pub mod trust;
 
 /// Path of the service discovery document, relative to the service base URL.
@@ -91,6 +92,12 @@ pub struct ServiceInfo {
     /// [`trust::KRL_NAMESPACE`]); may be relative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_list_signatures: Option<String>,
+    /// `POST` revocations here (when the service has a store).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoke_endpoint: Option<String>,
+    /// `GET` the caller's issued certificates here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub certificates_endpoint: Option<String>,
     /// The signed statement of which authorities to trust.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trust: Option<trust::SignedTrust>,

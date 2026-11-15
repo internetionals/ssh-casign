@@ -30,6 +30,7 @@ use ssh_casign_ca::{encoding, Backend, BackendError, BoxFuture, SignatureAlgorit
 use ssh_key::public::{EcdsaPublicKey, Ed25519PublicKey, KeyData, RsaPublicKey};
 
 mod credentials;
+pub mod gcs;
 
 use credentials::Credentials;
 
@@ -189,7 +190,12 @@ impl Config {
             builder = builder.add_root_certificate(certificate);
         }
         let http = builder.build().map_err(|err| err.to_string())?;
-        let credentials = Credentials::new(http.clone(), self.credentials_file.as_deref()).await?;
+        let credentials = Credentials::new(
+            http.clone(),
+            self.credentials_file.as_deref(),
+            credentials::KMS_SCOPE,
+        )
+        .await?;
         let endpoint = self
             .endpoint_url
             .clone()

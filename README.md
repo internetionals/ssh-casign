@@ -148,8 +148,13 @@ and carry a `known_hosts_pattern`. See [docs/trust.md](docs/trust.md).
 Revoked certificates (by serial or key ID) and keys (by fingerprint) are listed in a
 revocation file, which the service reloads when it changes. It serves them as a KRL,
 refuses to sign revoked keys, and the client's `krl` command keeps
-`/etc/ssh/revoked.krl` up to date from a timer. See
-[docs/revocation.md](docs/revocation.md).
+`/etc/ssh/revoked.krl` up to date from a timer.
+
+With optional shared storage (`[store]`: a directory, S3, GCS or Azure Blob), there is
+also a revocation API: key holders revoke their keys by proving possession, users
+revoke their own certificates (from any device), and administrators revoke anything,
+including everything a search of the issuance index matches (every issued
+certificate is recorded there). See [docs/revocation.md](docs/revocation.md).
 
 ### CA key backends
 
@@ -324,6 +329,8 @@ ssh-casign-client [OPTIONS] host [-n NAME] [--renew-before DURATION] [--on-chang
 ssh-casign-client [OPTIONS] ca-keys [-t user|host] [--hosts PATTERN] [-o FILE] [--on-change CMD]
 ssh-casign-client [OPTIONS] krl -o FILE [--on-change CMD]
 ssh-casign-client [OPTIONS] trust pin|show|statement|sign|verify
+ssh-casign-client [OPTIONS] revoke --key FILE | --all | --serial N --authority A | --where FIELD=VALUE ...
+ssh-casign-client [OPTIONS] certificates [--where FIELD=VALUE]
 ```
 
 `trust` pins the service's signed trust statement and signs statements offline

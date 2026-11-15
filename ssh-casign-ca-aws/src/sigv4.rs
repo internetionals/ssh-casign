@@ -1,4 +1,5 @@
-//! AWS Signature Version 4 for JSON POST requests to `/` (all KMS needs).
+//! AWS Signature Version 4: [`sign`] for KMS's JSON POST requests to `/`,
+//! [`sign_request`] for any request (S3).
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -89,10 +90,206 @@ pub(crate) fn sign(
     result
 }
 
+/// AWS's URI encoding: everything but `A-Za-z0-9-_.~` as `%XX`.
+pub(crate) fn uri_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
+/// The canonical (and sent) query string: encoded and sorted.
+pub(crate) fn canonical_query(pairs: &[(&str, &str)]) -> String {
+    let mut pairs: Vec<(String, String)> = pairs
+        .iter()
+        .map(|(name, value)| (uri_encode(name), uri_encode(value)))
+        .collect();
+    pairs.sort();
+    pairs
+        .iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// A request to sign with [`sign_request`].
+pub(crate) struct Request<'a> {
+    pub(crate) method: &'a str,
+    pub(crate) host: &'a str,
+    /// The path as sent (already encoded).
+    pub(crate) path: &'a str,
+    /// From [`canonical_query`].
+    pub(crate) query: &'a str,
+    /// Further headers to sign (and send), e.g. `if-match`.
+    pub(crate) headers: &'a [(&'a str, String)],
+    pub(crate) body: &'a [u8],
+}
+
+/// Headers to add to `request`: `x-amz-date`, `x-amz-content-sha256`, the
+/// session token and `authorization`. All of `request.headers` are signed.
+pub(crate) fn sign_request(
+    credentials: &Credentials,
+    region: &str,
+    service: &str,
+    request: &Request<'_>,
+    time: SystemTime,
+) -> Vec<(String, String)> {
+    let amz_date = amz_date(time);
+    let date = &amz_date[..8];
+    let payload_hash = hex(&Sha256::digest(request.body));
+    let mut headers: Vec<(String, String)> = request
+        .headers
+        .iter()
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    headers.push(("host".into(), request.host.to_string()));
+    headers.push(("x-amz-content-sha256".into(), payload_hash.clone()));
+    headers.push(("x-amz-date".into(), amz_date.clone()));
+    if let Some(token) = &credentials.session_token {
+        headers.push(("x-amz-security-token".into(), token.clone()));
+    }
+    headers.sort();
+    let signed_headers = headers
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(";");
+    let canonical_headers: String = headers
+        .iter()
+        .map(|(name, value)| format!("{name}:{value}\n"))
+        .collect();
+    let canonical_request = format!(
+        "{}\n{}\n{}\n{canonical_headers}\n{signed_headers}\n{payload_hash}",
+        request.method, request.path, request.query
+    );
+    let scope = format!("{date}/{region}/{service}/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        hex(&Sha256::digest(canonical_request.as_bytes()))
+    );
+    let key = hmac(
+        format!("AWS4{}", credentials.secret_access_key).as_bytes(),
+        date,
+    );
+    let key = hmac(&key, region);
+    let key = hmac(&key, service);
+    let key = hmac(&key, "aws4_request");
+    let signature = hex(&hmac(&key, &string_to_sign));
+    let mut result = vec![
+        ("x-amz-date".to_string(), amz_date),
+        ("x-amz-content-sha256".to_string(), payload_hash),
+        (
+            "authorization".to_string(),
+            format!(
+                "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed_headers}, Signature={signature}",
+                credentials.access_key_id
+            ),
+        ),
+    ];
+    if let Some(token) = &credentials.session_token {
+        result.push(("x-amz-security-token".to_string(), token.clone()));
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::time::parse_iso8601;
+
+    /// Vectors computed with botocore 1.44.3 (`S3SigV4Auth`), path-style
+    /// requests to s3.eu-west-1.amazonaws.com at 2026-11-15T08:39:48Z.
+    #[test]
+    fn s3_matches_botocore() {
+        let time = parse_iso8601("2026-11-15T08:39:48Z").unwrap();
+        let host = "s3.eu-west-1.amazonaws.com";
+        let list_query = canonical_query(&[("prefix", "issued/ab12/"), ("list-type", "2")]);
+        assert_eq!(list_query, "list-type=2&prefix=issued%2Fab12%2F");
+        let put_headers = [
+            ("If-Match", "\"0123abcd\"".to_string()),
+            ("Content-Type", "application/octet-stream".to_string()),
+        ];
+        // (method, path, query, headers, body, [signature, with token])
+        type Case<'a> = (
+            &'a str,
+            &'a str,
+            &'a str,
+            &'a [(&'a str, String)],
+            &'a [u8],
+            [&'a str; 2],
+        );
+        let cases: [Case; 3] = [
+            (
+                "GET",
+                "/ssh-casign/revocations.json",
+                "",
+                &[],
+                b"",
+                [
+                    "5eaf8fa2f27109e6bad2f39b5645b7dd21ccfc3b5531325a6c0d51040c815305",
+                    "2998f3c3608b92c3baad6e7385be4ba6f7fbbb49cd913053cb77034ff488faaa",
+                ],
+            ),
+            (
+                "PUT",
+                "/ssh-casign/revocations.json",
+                "",
+                &put_headers,
+                br#"{"revoked":[]}"#,
+                [
+                    "060aa6c2bd3c46fdb3b29cb4a06776f6d8e64f3320196cb0f8a9dfc68c3db68d",
+                    "558a3218313e0d2477e3422cd18a5107d50980f2ba3f3a382a10e303aab86c40",
+                ],
+            ),
+            (
+                "GET",
+                "/ssh-casign",
+                &list_query,
+                &[],
+                b"",
+                [
+                    "89603bdd7f7152328ffdc5a5847ad4aaf63a92a3bbe5ea69cff8e882bfa07beb",
+                    "217e92d8f75104ad88a933ffce6a1c0a1681cc956837acb52bf970e18fad0fdd",
+                ],
+            ),
+        ];
+        for (method, path, query, headers, body, expected) in cases {
+            for (token, expected) in [None, Some("IQoJb3JpZ2luX2VjEXAMPLETOKEN")]
+                .into_iter()
+                .zip(expected)
+            {
+                let credentials = Credentials {
+                    access_key_id: "AKIDEXAMPLE".into(),
+                    secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+                    session_token: token.map(String::from),
+                    expires: None,
+                };
+                let request = Request {
+                    method,
+                    host,
+                    path,
+                    query,
+                    headers,
+                    body,
+                };
+                let authorization = sign_request(&credentials, "eu-west-1", "s3", &request, time)
+                    .into_iter()
+                    .find(|(name, _)| name == "authorization")
+                    .unwrap()
+                    .1;
+                assert!(
+                    authorization.ends_with(&format!("Signature={expected}")),
+                    "{method} {path} token={}: {authorization}",
+                    token.is_some()
+                );
+            }
+        }
+    }
 
     /// Vectors computed with botocore 1.44.3 (`SigV4Auth`) for the same
     /// request: POST https://kms.eu-west-1.amazonaws.com/ with body

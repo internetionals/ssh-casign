@@ -5,12 +5,40 @@
 
 use std::{path::PathBuf, process::ExitCode};
 
-use ssh_casign_core::{Config, Registry};
+use ssh_casign_core::{Config, Registry, StoreRegistry};
 
 #[cfg(not(any(feature = "tls-native", feature = "tls-rustls")))]
 compile_error!("enable a TLS feature: tls-native (default) or tls-rustls");
 
 /// The CA key backends of this build, and hints for the others.
+/// The store backends this build has (the file store is always there).
+fn stores() -> StoreRegistry {
+    #[allow(unused_mut)]
+    let mut stores = StoreRegistry::new();
+    #[cfg(feature = "store-s3")]
+    stores.register(
+        ssh_casign_ca_aws::s3::STORE_TYPE,
+        ssh_casign_ca_aws::s3::load_store,
+    );
+    #[cfg(not(feature = "store-s3"))]
+    stores.unavailable("s3", "store-s3");
+    #[cfg(feature = "store-gcs")]
+    stores.register(
+        ssh_casign_ca_gcp::gcs::STORE_TYPE,
+        ssh_casign_ca_gcp::gcs::load_store,
+    );
+    #[cfg(not(feature = "store-gcs"))]
+    stores.unavailable("gcs", "store-gcs");
+    #[cfg(feature = "store-azure-blob")]
+    stores.register(
+        ssh_casign_ca_azure::blob::STORE_TYPE,
+        ssh_casign_ca_azure::blob::load_store,
+    );
+    #[cfg(not(feature = "store-azure-blob"))]
+    stores.unavailable("azure_blob", "store-azure-blob");
+    stores
+}
+
 fn registry() -> Registry {
     let mut registry = Registry::new();
     #[cfg(feature = "ca-file")]
@@ -66,7 +94,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let config: Config =
         toml::from_str(&config).map_err(|err| format!("failed to parse {source}: {err}"))?;
-    ssh_casign_core::serve(config, &registry()).await
+    ssh_casign_core::serve(config, &registry(), &stores()).await
 }
 
 #[tokio::main]

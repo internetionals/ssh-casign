@@ -2,6 +2,7 @@ use crate::config::Config;
 
 pub(crate) mod discovery;
 pub(crate) mod oidc;
+pub(crate) mod revoke;
 pub(crate) mod sign_key;
 pub(crate) mod state;
 
@@ -16,9 +17,10 @@ async fn no_store(mut response: axum::response::Response) -> axum::response::Res
 pub(crate) async fn main(
     config: Config,
     registry: &ssh_casign_ca::Registry,
+    stores: &ssh_casign_store::Registry,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listen = config.listen();
-    let app_state = state::AppState::new(config, registry).await?;
+    let app_state = state::AppState::new(config, registry, stores).await?;
 
     let app = axum::Router::new()
         .route(
@@ -32,6 +34,15 @@ pub(crate) async fn main(
         .route(
             "/revoked.krl.sig",
             axum::routing::get(discovery::revocation_list_signatures),
+        )
+        .route(
+            "/revoke",
+            axum::routing::post(revoke::revoke).layer(axum::middleware::map_response(no_store)),
+        )
+        .route(
+            "/certificates",
+            axum::routing::get(revoke::certificates)
+                .layer(axum::middleware::map_response(no_store)),
         )
         .route(
             "/sign",

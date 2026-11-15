@@ -456,6 +456,7 @@ impl AuditLog {
         let severity = match event.outcome {
             Outcome::Issued(_) => SyslogSeverity::Notice,
             Outcome::Denied { .. } => SyslogSeverity::Warning,
+            Outcome::Revoked(_) => SyslogSeverity::Notice,
         };
         let log = self.clone();
         tokio::task::spawn_blocking(move || log.write_all(&cef, severity))
@@ -522,7 +523,12 @@ pub(crate) struct Issued<'a> {
 
 pub(crate) enum Outcome<'a> {
     Issued(Issued<'a>),
-    Denied { status: u16, reason: &'a str },
+    Denied {
+        status: u16,
+        reason: &'a str,
+    },
+    /// A certificate or key revoked through the API.
+    Revoked(&'a ssh_casign_proto::revoke::RevokedEntry),
 }
 
 pub(crate) struct Event<'a> {
@@ -579,6 +585,7 @@ impl Event<'_> {
         let (class, name, severity) = match self.outcome {
             Outcome::Issued(_) => ("certificate-issued", "SSH certificate issued", 3),
             Outcome::Denied { .. } => ("certificate-denied", "SSH certificate request denied", 6),
+            Outcome::Revoked(_) => ("certificate-revoked", "SSH certificate or key revoked", 5),
         };
         let requester = self.requester;
         let mut extensions: Vec<(&str, String)> = vec![
@@ -652,6 +659,29 @@ impl Event<'_> {
                     ("cn1Label", "httpStatus".to_string()),
                     ("cn1", status.to_string()),
                 ]);
+            }
+            Outcome::Revoked(entry) => {
+                extensions.extend([
+                    ("act", "revoked".to_string()),
+                    ("outcome", "success".to_string()),
+                    ("duser", entry.revoked_by.clone()),
+                ]);
+                let optional = [
+                    ("flexString1Label", "serial", &entry.serial),
+                    ("cs4Label", "authority", &entry.authority),
+                    ("cs2Label", "keyId", &entry.key_id),
+                    ("cs6Label", "publicKeyFingerprint", &entry.fingerprint),
+                ];
+                for (label_key, label, value) in optional {
+                    if let Some(value) = value {
+                        let value_key = label_key.trim_end_matches("Label");
+                        extensions.push((label_key, label.to_string()));
+                        extensions.push((value_key, value.clone()));
+                    }
+                }
+                if let Some(reason) = &entry.reason {
+                    extensions.push(("reason", reason.clone()));
+                }
             }
         }
         let extensions = extensions

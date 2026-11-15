@@ -155,13 +155,103 @@ public key authentication. That fails closed, but it also locks everyone out. Fe
 KRL once before adding `RevokedKeys`, and keep the timer from deleting it: the client
 only ever replaces the file with a valid KRL.
 
-Later: a revocation API
------------------------
+The revocation API (optional)
+----------------------------
 
-The list is read through an internal `Source` interface (version check and load). A
-storage-backed source (file, S3, GCS, Azure Blob) with a `revoke` endpoint for
-administrators, and for users revoking their own certificates, can implement the same
-interface without changing the KRL or the checks.
+With shared storage (`[store]`), revocations can go through the service, so revoking
+doesn't need a file change or a deploy. Without `[store]` everything above works as
+before, and the API isn't offered.
+
+### Storage
+
+```toml
+[store]
+type = "file"                     # a directory: standalone servers
+path = "/var/lib/ssh-casign"
+
+# type = "s3"                     # feature store-s3 (AWS Lambda)
+# bucket = "ssh-casign-state"
+# prefix = "prod/"
+
+# type = "gcs"                    # feature store-gcs (Cloud Run)
+# bucket = "ssh-casign-state"
+
+# type = "azure_blob"             # feature store-azure-blob (Azure Functions)
+# account_url = "https://sshcasign.blob.core.windows.net"
+# container = "ssh-casign"
+```
+
+| Store        | Credentials                     | Permissions                                    |
+|--------------|---------------------------------|------------------------------------------------|
+| `file`       | the service's user              | read and write the directory                   |
+| `s3`         | AWS chain (as `aws_kms`)        | `s3:Get/Put/DeleteObject`, `s3:ListBucket`     |
+| `gcs`        | Google (as `gcp_kms`)           | `roles/storage.objectUser` on the bucket       |
+| `azure_blob` | Entra ID, or `account_key_file` | Storage Blob Data Contributor on the container |
+
+The store holds `revocations.json` (the API's revocations, next to the revocation file
+and the inline entries) and the issuance index under `issued/`. All writes to the
+revocations document are conditional (S3 `If-Match`, GCS `ifGenerationMatch`, Azure
+`If-Match`, a lock file for `file`): concurrent revocations on several instances retry
+instead of overwriting each other. Every instance reloads the store every
+`reload_interval`; the one that took a revocation applies it at once.
+
+### Who may revoke what
+
+```toml
+[revocation]
+admins = [{ claim = "roles", value = "ssh-admin" }]   # issuer: default oidc_provider
+# index = true                    # default with a store; see below
+```
+
+| Caller                   | Proves                        | May revoke                              |
+|--------------------------|-------------------------------|-----------------------------------------|
+| holder of a key          | an SSHSIG made with the key   | that key, with all its certificates     |
+| signed-in user           | a token from a trusted issuer | their own certificates (from the index) |
+| administrator (`admins`) | a token matching a selector   | anything, or all a search matches       |
+
+```sh
+# a key you still hold (a leaked key, a laptop you still have); no sign-in:
+ssh-casign-client revoke --key ~/.ssh/id_ed25519 --reason "key leaked"
+# your own certificates, from any device (a lost laptop):
+ssh-casign-client certificates
+ssh-casign-client revoke --all --reason "laptop lost"
+ssh-casign-client revoke --serial 16361417745147627987 --authority users
+ssh-casign-client revoke --certificate ~/.ssh/id_ed25519-cert.pub
+# administrators:
+ssh-casign-client revoke --fingerprint SHA256:... --reason "compromised"
+ssh-casign-client revoke --key-id ca1:default:alice@example.com:laptop
+ssh-casign-client certificates --where client_address=203.0.113.9
+ssh-casign-client revoke --where client_address=203.0.113.9 --reason "abuse from this address"
+```
+
+`--where FIELD=VALUE` (repeatable; all must match) searches the issuance index:
+`owner_issuer`, `owner_id`, `principal`, `fingerprint`, `key_id`, `profile`,
+`authority`, `app_name`, `client_address`. Searches across owners read every unexpired
+entry, which is fine for an investigation but not for routine use.
+
+A proof of possession is an SSHSIG (namespace `ssh-casign-revoke`) over the key, the
+service's trust domain (`trust.id`) and the time; it must be within ten minutes of the
+service's clock. The client signs with `ssh-keygen -Y sign`, so keys in files, on
+FIDO tokens and in `ssh-agent` (pass the `.pub` file) work.
+
+Each revocation is an audit record `certificate-revoked` with who revoked it (`duser`),
+what (serial, key ID or fingerprint) and the reason.
+
+### The issuance index
+
+With a store, every issued certificate is recorded under
+`issued/<owner>/<expiry>.<authority>.<serial>.json`: serial, authority, key ID, type,
+principals, validity, the key's fingerprint, profile, application name, client address
+and owner (token issuer and IdP-determined ID). That is what lets users revoke their own
+certificates and administrators find everything related to an incident.
+
+- **Fail closed**, like the audit log: if the entry can't be written, the certificate
+  is withheld (`Issuance index unavailable`).
+- **Only unexpired certificates are listed.** Entries are deleted when a listing passes
+  them a week after expiry. For S3, GCS and Azure, a lifecycle rule on `issued/` (delete
+  after the longest `max_validity` plus a week) keeps the store small without that.
+- `index = false` turns it off: revoking by possession and by administrators still
+  works, users can't list or revoke their own certificates.
 
 Tested
 ------
@@ -177,3 +267,21 @@ End to end with `sshd`, `ssh` and `ssh-keygen -Q`:
 - the service refused to sign the revoked key;
 - `krl` replaced the file only on change, and `If-None-Match` got a 304;
 - a broken revocation file was reported once and the previous list kept.
+
+The API, end to end with two service instances on one store (file, and S3 on
+LocalStack), the mock IdP and `ssh-keygen -Q`:
+
+- a user listed and revoked their own certificate by serial; revoking another user's
+  certificate, revoking by fingerprint and searching were refused;
+- a key holder revoked a key that was never signed in, and the service then refused to
+  sign it;
+- an administrator found the user's certificates by principal and revoked every
+  certificate requested from one address;
+- the other instance's KRL had all four revocations within a second;
+- the audit log recorded each revocation, with who and why.
+
+The stores passed the same tests (conditional writes, list, delete) against LocalStack
+4.0.3 (S3), fake-gcs-server 1.54.0 (GCS) and Azurite 3.35.0 (Azure Blob, Shared Key), and
+eight concurrent writers lost no update on the file store. S3 request signing matches
+botocore's. Entra ID authentication for Azure Blob and the real cloud services are not
+tested yet.

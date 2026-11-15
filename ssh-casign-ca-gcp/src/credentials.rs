@@ -23,7 +23,9 @@ use base64ct::{Base64UrlUnpadded, Encoding as _};
 use serde::Deserialize;
 
 /// Cloud KMS scope.
-const SCOPE: &str = "https://www.googleapis.com/auth/cloudkms";
+pub(crate) const KMS_SCOPE: &str = "https://www.googleapis.com/auth/cloudkms";
+/// Cloud Storage objects.
+pub(crate) const STORAGE_SCOPE: &str = "https://www.googleapis.com/auth/devstorage.read_write";
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
 const METADATA_HOST: &str = "metadata.google.internal";
 const RENEW_MARGIN: Duration = Duration::from_secs(300);
@@ -84,6 +86,7 @@ enum Source {
 /// Access tokens for Cloud KMS.
 pub(crate) struct Credentials {
     http: reqwest::Client,
+    scope: &'static str,
     source: Source,
     description: String,
     cached: Mutex<Option<(String, SystemTime)>>,
@@ -144,6 +147,7 @@ fn load_key_file(path: &Path) -> Result<(Source, String), String> {
 
 /// A signed JWT asserting the service account, for the token endpoint.
 fn service_account_assertion(
+    scope: &str,
     email: &str,
     key: &rsa::RsaPrivateKey,
     key_id: Option<&str>,
@@ -157,7 +161,7 @@ fn service_account_assertion(
     }
     let claims = serde_json::json!({
         "iss": email,
-        "scope": SCOPE,
+        "scope": scope,
         "aud": token_uri,
         "iat": now,
         "exp": now + 3600,
@@ -180,6 +184,7 @@ impl Credentials {
     pub(crate) async fn new(
         http: reqwest::Client,
         credentials_file: Option<&Path>,
+        scope: &'static str,
     ) -> Result<Self, String> {
         let file = credentials_file
             .map(Path::to_path_buf)
@@ -194,6 +199,7 @@ impl Credentials {
         };
         let credentials = Credentials {
             http,
+            scope,
             source,
             description,
             cached: Mutex::new(None),
@@ -241,8 +247,14 @@ impl Credentials {
                     .duration_since(UNIX_EPOCH)
                     .map_err(|err| err.to_string())?
                     .as_secs();
-                let assertion =
-                    service_account_assertion(email, key, key_id.as_deref(), token_uri, now);
+                let assertion = service_account_assertion(
+                    self.scope,
+                    email,
+                    key,
+                    key_id.as_deref(),
+                    token_uri,
+                    now,
+                );
                 self.http.post(token_uri).form(&[
                     ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
                     ("assertion", assertion.as_str()),
@@ -263,7 +275,7 @@ impl Credentials {
                 .get(format!(
                     "http://{host}/computeMetadata/v1/instance/service-accounts/default/token"
                 ))
-                .query(&[("scopes", SCOPE)])
+                .query(&[("scopes", self.scope)])
                 .header("Metadata-Flavor", "Google")
                 .timeout(Duration::from_secs(5)),
         };
@@ -293,6 +305,7 @@ mod tests {
         };
         let private = ssh_casign_ca::encoding::rsa_private_key(keypair).unwrap();
         let jwt = service_account_assertion(
+            KMS_SCOPE,
             "ca@project.iam.gserviceaccount.com",
             &private,
             Some("kid1"),

@@ -21,7 +21,7 @@ CONFIG=path/to/config.toml deploy/aws-lambda/build.sh
 - `ARCH=arm64` (default, Graviton) or `ARCH=x86_64`; `IMAGE=name:tag`.
 - The binary is static (musl, rustls), built by `deploy/build-static.sh` (natively on
   a machine of the same architecture, else cross-compiled with `cargo-zigbuild`).
-  Features: `ca-aws-kms,tls-rustls`; extra features can be passed as the first
+  Features: `ca-aws-kms,store-s3,tls-rustls`; extra features can be passed as the first
   argument.
 - The image is `public.ecr.aws/lambda/provided:al2023` with the binary as
   `/var/runtime/bootstrap` and the adapter in `/opt/extensions/`. The service listens
@@ -115,6 +115,26 @@ type = "stdout"
   authority on another backend.
 - **Cold start** loads the IdP's keys and every authority's public key; Lambda allows
   10 seconds for that.
+
+Revocation API (optional)
+-------------------------
+
+With an S3 bucket, revocations go through the service instead of a redeploy, and
+every issued certificate is indexed for users and administrators (see
+[docs/revocation.md](../../docs/revocation.md)):
+
+```toml
+[store]
+type = "s3"
+bucket = "ssh-casign-state"
+
+[revocation]
+admins = [{ claim = "roles", value = "ssh-admin" }]
+```
+
+Give the execution role `s3:GetObject`, `s3:PutObject` and `s3:DeleteObject` on
+`arn:aws:s3:::ssh-casign-state/*` and `s3:ListBucket` on the bucket, and add a lifecycle
+rule that expires `issued/` objects after the longest certificate validity plus a week.
 
 Audit log
 ---------

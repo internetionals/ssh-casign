@@ -17,6 +17,9 @@ pub struct Config {
     pub(crate) issuers: std::collections::BTreeMap<String, crate::web::oidc::IssuerConfig>,
     pub(crate) profiles: crate::certificate::profiles::Profiles,
     pub(crate) authorities: ssh_casign_ca::Config,
+    /// Shared storage (optional): the revocation API and the issuance index
+    /// need it. `type` picks the backend.
+    pub(crate) store: Option<toml::Table>,
     /// The signed trust statement; without it, automatic mode.
     pub(crate) trust: Option<crate::trust::Config>,
     /// Revoked certificates and keys; without it, the KRL is empty.

@@ -280,6 +280,13 @@ impl Trust {
         }
     }
 
+    /// The trust domain's name (for proofs of possession).
+    pub(crate) fn id(&self) -> String {
+        serde_json::from_str::<TrustStatement>(&self.current().statement)
+            .map(|statement| statement.id)
+            .unwrap_or_default()
+    }
+
     pub(crate) fn current(&self) -> SignedTrust {
         self.current
             .read()

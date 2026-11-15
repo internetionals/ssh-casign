@@ -22,7 +22,7 @@ The binary is static (x86-64 Linux, musl, rustls), so it doesn't depend on the O
 version of the Functions image. `deploy/build-static.sh` builds it in a `rust`
 container: natively on an x86-64 machine, otherwise cross-compiled with `cargo-zigbuild`
 (no emulation, so ARM machines work too). Features:
-`ca-azure-keyvault,tls-rustls`; extra features can be passed as the first argument, e.g.
+`ca-azure-keyvault,store-azure-blob,tls-rustls`; extra features can be passed as the first argument, e.g.
 `build.sh ca-file`.
 
 Without `CONFIG`, set the configuration as the app setting `SSH_CASIGN_CONFIG_TOML`
@@ -104,6 +104,15 @@ type = "stdout"
   trust the new public key on servers first).
 - **`ssh-rsa`** (SHA-1) can't be signed by Key Vault. Profiles that need it require an
   authority on another backend.
+
+Revocation API (optional)
+-------------------------
+
+With a Blob container (`[store] type = "azure_blob"`, `account_url = "..."`,
+`container = "..."`), revocations go through the service and every issued
+certificate is indexed (see [docs/revocation.md](../../docs/revocation.md)). Give the
+managed identity "Storage Blob Data Contributor" on the container, and add a lifecycle
+management rule for `issued/`.
 
 Audit log
 ---------

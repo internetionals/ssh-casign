@@ -20,6 +20,7 @@ pub(super) fn document(
     authorities: &SshCaProviders,
     trust: ssh_casign_proto::trust::SignedTrust,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let has_store = config.store.is_some();
     let authorities = authorities
         .iter()
         .map(|(name, provider)| {
@@ -47,6 +48,8 @@ pub(super) fn document(
         revocation_list: Some(REVOCATION_LIST.to_string()),
         revocation_list_signatures: Some(REVOCATION_LIST_SIGNATURES.to_string()),
         trust: Some(trust),
+        revoke_endpoint: has_store.then(|| "../revoke".to_string()),
+        certificates_endpoint: has_store.then(|| "../certificates".to_string()),
         authorities,
     };
     Ok(serde_json::to_string_pretty(&info)?)

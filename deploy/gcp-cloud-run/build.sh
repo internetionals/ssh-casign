@@ -8,7 +8,7 @@ set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ARCH="${ARCH:-x86_64}"
 IMAGE="${IMAGE:-ssh-casign-cloud-run:latest}"
-BINARY="$("$HERE/../build-static.sh" "$ARCH" "ca-gcp-kms${1:+,$1}")"
+BINARY="$("$HERE/../build-static.sh" "$ARCH" "ca-gcp-kms,store-gcs${1:+,$1}")"
 
 CONTEXT="$HERE/dist/context"
 rm -rf "$CONTEXT"

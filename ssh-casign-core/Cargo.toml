@@ -18,6 +18,7 @@ serde_json = "1.0.132"
 sha2 = "0.10.9"
 ssh-casign-ca = { path = "../ssh-casign-ca" }
 ssh-casign-proto = { path = "../ssh-casign-proto" }
+ssh-casign-store = { path = "../ssh-casign-store" }
 ssh-key = { version = "0.6.7", features = ["p256", "p384", "p521", "ed25519", "rsa"] }
 thiserror = "2.0.3"
 tokio = { version = "1.41.1", features = ["full"] }

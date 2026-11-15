@@ -30,7 +30,8 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Google Cloud Run                       |  ✅   | distroless image in deploy/gcp-cloud-run                 |
 | User certificates                      |  ✅   |                                                          |
 | Host certificates                      |  ✅   | machine, admin and orchestrator routes (docs/hosts.md)   |
-| Revocation (KRL)                       |  🟡   | revocation file → `/revoked.krl`; API later              |
+| Revocation (KRL)                       |  ✅   | file and API (store) → `/revoked.krl` (docs/revocation)  |
+| Shared storage, issuance index         |  ✅   | optional; file, S3, GCS, Azure Blob                      |
 | Signed trust statement, pinning        |  ✅   | automatic or offline trust keys, k of n (docs/trust.md)  |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
 | Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |
@@ -197,8 +198,9 @@ Suggested order of work
    integration tests.
 7. ~~Host certificates~~ (done: machines, administrators and orchestrators; all CA
    backends are done too).
-9. ~~Revocation from a file, served as a KRL~~ (done, docs/revocation.md). Next: a
-   revoke API with storage backends, so revoking doesn't need a file change.
+9. ~~Revocation from a file, served as a KRL; the revoke API with storage backends~~
+   (done, docs/revocation.md). Still to do: Entra ID auth for Azure Blob tested, and
+   the real cloud stores.
 8. ~~Serverless deployment per platform, each with its cloud KMS~~ (done: Azure
    Functions, AWS Lambda, Google Cloud Run). Still to do: tests against the real cloud
    services, and workload identity federation for GCP.
