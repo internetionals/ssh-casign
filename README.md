@@ -72,6 +72,8 @@ only the service URL:
   "scopes": ["openid", "profile"],
   "sign_endpoint": "../sign",
   "revocation_list": "../revoked.krl",
+  "revocation_list_signatures": "../revoked.krl.sig",
+  "trust": { "statement": "{\"id\":\"example\",...}", "signatures": ["-----BEGIN SSH SIGNATURE-----..."] },
   "authorities": {
     "default": { "public_key": "ssh-ed25519 AAAA...", "cert_types": ["user"] }
   }
@@ -132,6 +134,14 @@ that signs for the hosts it manages (names requested, limited by
 `matching_principals`). The client's `host` command renews a machine's certificates
 from a timer, and `ca-keys` prints the `@cert-authority` lines for `known_hosts`. See
 [docs/hosts.md](docs/hosts.md).
+
+### Trusting the authorities
+
+The discovery document carries a signed trust statement: the CA keys, signed by the
+authorities themselves (automatic) or by offline trust keys, e.g. 2 of 3 YubiKeys. The
+client pins it (`trust pin`); `ca-keys` and `krl` then only accept a changed set of
+CAs, or a KRL, that the pinned keys signed. Authorities can be retired for rotation
+and carry a `known_hosts_pattern`. See [docs/trust.md](docs/trust.md).
 
 ### Revocation
 
@@ -311,11 +321,14 @@ ssh-casign-client [OPTIONS] login [-k KEY] [--new] [--min-remaining DURATION] [R
 ssh-casign-client [OPTIONS] logout [--keep-agent]
 ssh-casign-client [OPTIONS] cert [-t user|host] [-o FILE] [REQUEST OPTIONS] [PUBLIC_KEY_FILE]
 ssh-casign-client [OPTIONS] host [-n NAME] [--renew-before DURATION] [--on-change CMD] [KEY.pub ...]
-ssh-casign-client [OPTIONS] ca-keys [-t user|host] [--hosts PATTERN]
+ssh-casign-client [OPTIONS] ca-keys [-t user|host] [--hosts PATTERN] [-o FILE] [--on-change CMD]
 ssh-casign-client [OPTIONS] krl -o FILE [--on-change CMD]
+ssh-casign-client [OPTIONS] trust pin|show|statement|sign|verify
 ```
 
-`krl` fetches the revocation list ([docs/revocation.md](docs/revocation.md)). `host`
+`trust` pins the service's signed trust statement and signs statements offline
+([docs/trust.md](docs/trust.md)). `krl` fetches the revocation list
+([docs/revocation.md](docs/revocation.md)). `host`
 and `ca-keys` are described in [docs/hosts.md](docs/hosts.md), together with
 the non-interactive sign-in methods for machines (`client-credentials`, `token-file`,
 `gcp-metadata`, `azure-managed-identity`, `github-actions`).

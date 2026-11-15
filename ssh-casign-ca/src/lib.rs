@@ -121,6 +121,14 @@ struct AuthorityConfig {
     /// the key and backend support except `ssh-rsa` (SHA-1), which must be
     /// listed here explicitly to be used.
     signature_algorithms: Option<Vec<SignatureAlgorithm>>,
+    /// Retired: no longer signs certificates, but stays published (for
+    /// servers and clients that still trust its certificates) and in the KRL
+    /// until it is removed. Part of rotating a CA key.
+    #[serde(default)]
+    retired: bool,
+    /// The host names this host CA speaks for, as a `known_hosts` pattern
+    /// list (`*.example.com,10.0.0.*`); published for `@cert-authority` lines.
+    known_hosts_pattern: Option<String>,
     /// Everything else is the backend's configuration.
     #[serde(flatten)]
     backend: toml::Table,
@@ -139,6 +147,8 @@ pub struct Authority {
     public_key: PublicKey,
     cert_types: Vec<CertType>,
     signature_algorithms: Vec<SignatureAlgorithm>,
+    retired: bool,
+    known_hosts_pattern: Option<String>,
 }
 
 /// Loaded authorities by name.
@@ -206,11 +216,18 @@ impl AuthorityConfig {
         }
         let mut cert_types: Vec<CertType> = self.cert_types.iter().copied().collect();
         cert_types.sort();
+        if let Some(pattern) = &self.known_hosts_pattern {
+            if pattern.is_empty() || pattern.chars().any(char::is_whitespace) {
+                return Err("known_hosts_pattern must be a pattern list without spaces".into());
+            }
+        }
         Ok(Authority {
             public_key: PublicKey::from(backend.public_key().clone()),
             backend,
             cert_types,
             signature_algorithms,
+            retired: self.retired,
+            known_hosts_pattern: self.known_hosts_pattern.clone(),
         })
     }
 }
@@ -224,6 +241,22 @@ impl Authority {
     /// Certificate types this CA is configured to sign.
     pub fn cert_types(&self) -> &[CertType] {
         &self.cert_types
+    }
+
+    /// No longer signs certificates (see `retired` in the config).
+    pub fn retired(&self) -> bool {
+        self.retired
+    }
+
+    pub fn known_hosts_pattern(&self) -> Option<&str> {
+        self.known_hosts_pattern.as_deref()
+    }
+
+    /// Sign `message` as an SSHSIG (`ssh-keygen -Y sign`) in `namespace`,
+    /// returning the armored signature. Used for the trust statement and the
+    /// KRL, so servers can tell the service's own lists from forged ones.
+    pub async fn sign_sshsig(&self, namespace: &str, message: &[u8]) -> Result<String, SignError> {
+        sign_sshsig(self.backend.as_ref(), namespace, message).await
     }
 
     /// Signature algorithms this CA offers, in order of preference.
@@ -275,6 +308,40 @@ pub enum SignError {
     SystemTime(#[from] std::time::SystemTimeError),
 }
 
+/// SSHSIG with `backend` (see [`Authority::sign_sshsig`]), verified before it
+/// is returned.
+async fn sign_sshsig(
+    backend: &dyn Backend,
+    namespace: &str,
+    message: &[u8],
+) -> Result<String, SignError> {
+    let (_, preferred) =
+        SignatureAlgorithm::for_key(backend.public_key()).map_err(SignError::Verification)?;
+    let capable = backend.algorithms();
+    let algorithm = preferred
+        .into_iter()
+        .find(|algorithm| capable.contains(algorithm))
+        .ok_or_else(|| SignError::Verification("no SSHSIG-capable algorithm".into()))?;
+    let hash = ssh_key::HashAlg::Sha512;
+    let invalid = |err: ssh_key::Error| SignError::Verification(err.to_string());
+    let data = ssh_key::SshSig::signed_data(namespace, hash, message).map_err(invalid)?;
+    let raw = backend
+        .sign(algorithm, &data)
+        .await
+        .map_err(SignError::Backend)?;
+    let signature = ssh_key::Signature::new(
+        ssh_key::Algorithm::new(algorithm.as_str()).map_err(invalid)?,
+        raw,
+    )
+    .map_err(invalid)?;
+    let sshsig = ssh_key::SshSig::new(backend.public_key().clone(), namespace, hash, signature)
+        .map_err(invalid)?;
+    PublicKey::from(backend.public_key().clone())
+        .verify(namespace, message, &sshsig)
+        .map_err(|err| SignError::Verification(format!("SSHSIG: {err}")))?;
+    sshsig.to_pem(ssh_key::LineEnding::LF).map_err(invalid)
+}
+
 /// The authority and signature algorithm for a request: the first authority
 /// in the profile's order that signs `cert_type` and offers one of the
 /// `accepted` algorithms (any, if the client didn't say), with its most
@@ -288,7 +355,7 @@ pub fn select<'a>(
     let signs_type = |name: &Arc<str>| {
         authorities
             .get(name)
-            .filter(|authority| authority.cert_types.contains(&cert_type))
+            .filter(|authority| !authority.retired && authority.cert_types.contains(&cert_type))
     };
     if !profile_authorities
         .iter()
@@ -344,15 +411,15 @@ pub fn select<'a>(
 pub mod testing {
     use super::*;
 
-    /// A backend that has an Ed25519 key but never signs.
-    struct UnusedBackend(KeyData);
+    /// An in-memory Ed25519 backend.
+    struct MemoryBackend(ssh_key::private::Ed25519Keypair, KeyData);
 
-    impl Backend for UnusedBackend {
+    impl Backend for MemoryBackend {
         fn describe(&self) -> String {
-            "unused test backend".into()
+            "in-memory test backend".into()
         }
         fn public_key(&self) -> &KeyData {
-            &self.0
+            &self.1
         }
         fn algorithms(&self) -> Vec<SignatureAlgorithm> {
             vec![SignatureAlgorithm::Ed25519]
@@ -360,27 +427,37 @@ pub mod testing {
         fn sign<'a>(
             &'a self,
             _: SignatureAlgorithm,
-            _: &'a [u8],
+            data: &'a [u8],
         ) -> BoxFuture<'a, Result<Vec<u8>, BackendError>> {
-            Box::pin(async { Err(BackendError::new("test backend doesn't sign")) })
+            let key = ssh_key::PrivateKey::from(self.0.clone());
+            let bytes = signature::Signer::<ssh_key::Signature>::try_sign(&key, data)
+                .map(|signature| signature.as_bytes().to_vec())
+                .map_err(|err| BackendError::new(err.to_string()));
+            Box::pin(async move { bytes })
         }
     }
 
-    /// Authorities with these names (Ed25519 keys from fixed seeds), signing
-    /// user and host certificates, for tests that need names and public keys.
+    /// The Ed25519 key of test authority number `index` in [`authorities`].
+    pub fn authority_key(index: usize) -> ssh_key::private::Ed25519Keypair {
+        ssh_key::private::Ed25519Keypair::from_seed(&[index as u8 + 100; 32])
+    }
+
+    /// Authorities with these names (in-memory Ed25519 keys from fixed
+    /// seeds), signing user and host certificates.
     pub fn authorities(names: &[&str]) -> Authorities {
         names
             .iter()
             .enumerate()
             .map(|(index, name)| {
-                let key = KeyData::Ed25519(
-                    ssh_key::private::Ed25519Keypair::from_seed(&[index as u8 + 100; 32]).public,
-                );
+                let keypair = authority_key(index);
+                let key = KeyData::Ed25519(keypair.public);
                 let authority = Authority {
                     public_key: PublicKey::from(key.clone()),
-                    backend: Box::new(UnusedBackend(key)),
+                    backend: Box::new(MemoryBackend(keypair, key)),
                     cert_types: vec![CertType::User, CertType::Host],
                     signature_algorithms: vec![SignatureAlgorithm::Ed25519],
+                    retired: false,
+                    known_hosts_pattern: None,
                 };
                 (Arc::from(*name), Arc::new(authority))
             })
@@ -414,6 +491,10 @@ pub mod testing {
                 return Err(format!("{algorithm}: wrong principals"));
             }
         }
+        // SSHSIG (trust statement, KRL) with the backend's preferred algorithm.
+        sign_sshsig(backend, "ssh-casign-test", b"message")
+            .await
+            .map_err(|err| format!("{}: SSHSIG: {err}", backend.describe()))?;
         Ok(())
     }
 
@@ -463,6 +544,8 @@ mod tests {
             backend: Box::new(TestBackend(key, algorithms.to_vec())),
             cert_types: vec![cert_type],
             signature_algorithms: algorithms.to_vec(),
+            retired: false,
+            known_hosts_pattern: None,
         }
     }
 
@@ -502,6 +585,50 @@ mod tests {
                 && err.contains("available: [ssh-ed25519, rsa-sha2-512"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn sshsig_verifies_with_ssh_key() {
+        let authorities = testing::authorities(&["a"]);
+        let authority = &authorities["a"];
+        let armored = authority
+            .sign_sshsig("ssh-casign-test", b"message")
+            .await
+            .unwrap();
+        assert!(armored.starts_with("-----BEGIN SSH SIGNATURE-----"));
+        let sshsig = ssh_key::SshSig::from_pem(&armored).unwrap();
+        authority
+            .public_key()
+            .verify("ssh-casign-test", b"message", &sshsig)
+            .unwrap();
+        assert!(authority
+            .public_key()
+            .verify("other-namespace", b"message", &sshsig)
+            .is_err());
+        assert!(authority
+            .public_key()
+            .verify("ssh-casign-test", b"other", &sshsig)
+            .is_err());
+    }
+
+    #[test]
+    fn selection_skips_retired_authorities() {
+        let mut old = typed_authority(1, &[SignatureAlgorithm::Ed25519], CertType::User);
+        old.retired = true;
+        let authorities: Authorities = [
+            ("old", old),
+            (
+                "new",
+                typed_authority(2, &[SignatureAlgorithm::Ed25519], CertType::User),
+            ),
+        ]
+        .into_iter()
+        .map(|(name, authority)| (Arc::from(name), Arc::new(authority)))
+        .collect();
+        let profile: Vec<Arc<str>> = ["old", "new"].into_iter().map(Arc::from).collect();
+        let (name, _, _) = select(&profile, &authorities, CertType::User, None).unwrap();
+        assert_eq!(name, "new");
+        assert!(select(&profile[..1], &authorities, CertType::User, None).is_err());
     }
 
     #[test]

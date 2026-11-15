@@ -31,6 +31,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | User certificates                      |  ✅   |                                                          |
 | Host certificates                      |  ✅   | machine, admin and orchestrator routes (docs/hosts.md)   |
 | Revocation (KRL)                       |  🟡   | revocation file → `/revoked.krl`; API later              |
+| Signed trust statement, pinning        |  ✅   | automatic or offline trust keys, k of n (docs/trust.md)  |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
 | Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |
 | Behind proxies and CDNs                |  ✅   | `trusted_proxies`, XFF/RFC 7239/CF headers, `CF-Ray`     |

@@ -189,14 +189,19 @@ An orchestrator does the same with a machine profile (`-p cmdb`, `sign_in =
 ### `ca-keys`: trust the authorities
 
 ```sh
-# on clients: known_hosts
-ssh-casign-client ca-keys --type host --hosts '*.example.com' >> ~/.ssh/known_hosts
-# on servers: TrustedUserCAKeys
-ssh-casign-client ca-keys --type user > /etc/ssh/trusted-user-ca-keys
+ssh-casign-client trust pin --expect SHA256:...      # once; see trust.md
+# on clients: a known_hosts file of its own (GlobalKnownHostsFile can list several)
+ssh-casign-client ca-keys --type host -o /etc/ssh/ssh_known_hosts.d/ssh-casign
+# on servers: TrustedUserCAKeys (sshd reads it on every connection)
+ssh-casign-client ca-keys --type user -o /etc/ssh/trusted-user-ca-keys
 ```
 
-`--hosts` is a `known_hosts` pattern list (`*.example.com,10.0.0.*`). Keep it as narrow
-as the names the host profiles allow.
+The `@cert-authority` pattern comes from each host authority's `known_hosts_pattern`
+(service config), or `--hosts` (`*.example.com,10.0.0.*`). Keep it as narrow as the
+names the host profiles allow; without either, `ca-keys` warns and uses `*`. With
+`-o`, the file is only replaced when it changed, and `--on-change` runs after a change.
+With a pinned trust statement, the keys only come from a statement the pinned keys
+signed ([trust.md](trust.md)).
 
 To withdraw a host certificate before it expires (a decommissioned or compromised
 host), revoke it and let clients fetch the KRL for `RevokedHostKeys`; see

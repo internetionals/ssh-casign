@@ -345,9 +345,9 @@ impl Profiles {
             }
             for cert_type in settings.cert_types() {
                 let signed = settings.authorities().iter().any(|name| {
-                    authorities
-                        .get(name)
-                        .is_some_and(|authority| authority.cert_types().contains(cert_type))
+                    authorities.get(name).is_some_and(|authority| {
+                        !authority.retired() && authority.cert_types().contains(cert_type)
+                    })
                 });
                 if !signed {
                     return Err(format!(

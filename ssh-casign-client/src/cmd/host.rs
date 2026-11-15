@@ -141,7 +141,7 @@ impl Keep<'_> {
 
 /// Write `content` to `path` atomically (temporary file and rename), readable
 /// by everyone like the public key next to it.
-pub(super) fn write_atomically(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
+pub(crate) fn write_atomically(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     let temporary = dir.join(format!(".{name}.{}.tmp", std::process::id()));
@@ -158,7 +158,7 @@ pub(super) fn write_atomically(path: &Path, content: impl AsRef<[u8]>) -> Result
     })
 }
 
-pub(super) fn run_on_change(command: &str) -> Result<()> {
+pub(crate) fn run_on_change(command: &str) -> Result<()> {
     tracing::info!("running {command}");
     let status = if cfg!(windows) {
         std::process::Command::new("cmd")

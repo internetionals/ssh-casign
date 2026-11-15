@@ -2277,6 +2277,7 @@ dependencies = [
  "serde",
  "sha1",
  "sha2",
+ "signature",
  "ssh-casign-proto",
  "ssh-encoding",
  "ssh-key",
@@ -2440,6 +2441,9 @@ name = "ssh-casign-proto"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+ "ssh-key",
+ "toml",
 ]
 
 [[package]]

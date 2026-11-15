@@ -181,6 +181,8 @@ pub(crate) struct Snapshot {
     key_ids: BTreeMap<String, BTreeSet<String>>,
     krl: Arc<[u8]>,
     etag: String,
+    /// SSHSIG signatures of the KRL by every authority.
+    signatures: Arc<str>,
 }
 
 /// `SHA256:<base64>` to the raw hash.
@@ -304,6 +306,7 @@ impl Snapshot {
             key_ids,
             krl: krl.into(),
             etag,
+            signatures: Arc::from(""),
         })
     }
 
@@ -319,6 +322,11 @@ impl Snapshot {
 
     pub(crate) fn krl(&self) -> Arc<[u8]> {
         self.krl.clone()
+    }
+
+    /// The authorities' signatures over the KRL, concatenated.
+    pub(crate) fn signatures(&self) -> Arc<str> {
+        self.signatures.clone()
     }
 
     pub(crate) fn etag(&self) -> &str {
@@ -383,18 +391,39 @@ fn encode_krl(
     Ok(out)
 }
 
+/// Build the snapshot and sign the KRL with every authority, so clients
+/// can tell it from a forged or emptied list.
+async fn build_signed(loaded: Loaded, authorities: &Authorities) -> Result<Snapshot, String> {
+    let mut snapshot = Snapshot::build(loaded, authorities)?;
+    let mut names: Vec<_> = authorities.keys().collect();
+    names.sort();
+    let mut signatures = String::new();
+    for name in names {
+        let signature = authorities[name]
+            .sign_sshsig(ssh_casign_proto::trust::KRL_NAMESPACE, &snapshot.krl)
+            .await
+            .map_err(|err| format!("KRL: authority {name} can't sign: {err}"))?;
+        signatures.push_str(&signature);
+        if !signatures.ends_with('\n') {
+            signatures.push('\n');
+        }
+    }
+    snapshot.signatures = Arc::from(signatures);
+    Ok(snapshot)
+}
+
 /// The current revocations, reloaded from the source in the background.
 pub(crate) struct Revocations {
     current: RwLock<Arc<Snapshot>>,
     /// The last version tried (loaded or not) and the last error, so a
     /// broken file is reported once rather than on every check.
-    tried: std::sync::Mutex<(u64, Option<String>)>,
+    tried: tokio::sync::Mutex<(u64, Option<String>)>,
 }
 
 impl Revocations {
     /// Load the revocations (errors are fatal at startup) and start the
     /// reload task.
-    pub(crate) fn start(
+    pub(crate) async fn start(
         config: Option<&Config>,
         authorities: &Authorities,
     ) -> Result<Arc<Self>, String> {
@@ -406,7 +435,7 @@ impl Revocations {
             started: unix_secs(SystemTime::now()),
         });
         let loaded = source.load()?;
-        let snapshot = Snapshot::build(loaded, authorities)?;
+        let snapshot = build_signed(loaded, authorities).await?;
         if snapshot.count > 0 || config.file.is_some() {
             tracing::info!(
                 "{} revocation(s) from {}",
@@ -415,7 +444,7 @@ impl Revocations {
             );
         }
         let revocations = Arc::new(Self {
-            tried: std::sync::Mutex::new((snapshot.changed, None)),
+            tried: tokio::sync::Mutex::new((snapshot.changed, None)),
             current: RwLock::new(Arc::new(snapshot)),
         });
         if config.file.is_some() && config.reload_interval > 0 {
@@ -430,7 +459,7 @@ impl Revocations {
                     let Some(revocations) = weak.upgrade() else {
                         return;
                     };
-                    revocations.reload(source.as_ref(), &authorities);
+                    revocations.reload(source.as_ref(), &authorities).await;
                 }
             });
         }
@@ -440,18 +469,19 @@ impl Revocations {
     /// Reload from `source` if it changed. A broken list keeps the previous
     /// one: new revocations then don't apply until it's fixed, so this logs
     /// an error.
-    fn reload(&self, source: &dyn Source, authorities: &Authorities) {
-        let mut tried = self.tried.lock().unwrap_or_else(|e| e.into_inner());
-        let result = source.version().and_then(|version| {
-            if version == tried.0 {
-                return Ok(None);
+    async fn reload(&self, source: &dyn Source, authorities: &Authorities) {
+        let mut tried = self.tried.lock().await;
+        let result = match source.version() {
+            Ok(version) if version == tried.0 => Ok(None),
+            Ok(version) => {
+                tried.0 = version;
+                match source.load() {
+                    Ok(loaded) => build_signed(loaded, authorities).await.map(Some),
+                    Err(err) => Err(err),
+                }
             }
-            tried.0 = version;
-            source
-                .load()
-                .and_then(|loaded| Snapshot::build(loaded, authorities))
-                .map(Some)
-        });
+            Err(err) => Err(err),
+        };
         match result {
             Ok(Some(snapshot)) => {
                 tracing::info!(
@@ -551,7 +581,9 @@ mod tests {
         ))
         .unwrap();
         let authorities = authorities();
-        let revocations = Revocations::start(Some(&config), &authorities).unwrap();
+        let revocations = Revocations::start(Some(&config), &authorities)
+            .await
+            .unwrap();
         let source = FileSource {
             file: Some(file.clone()),
             inline: vec![],
@@ -567,21 +599,33 @@ mod tests {
         };
         std::fs::write(&file, "[[revoked]]\nkey_id = \"x\"\n").unwrap();
         set_mtime(2_000_000_000);
-        revocations.reload(&source, &authorities);
+        revocations.reload(&source, &authorities).await;
         assert!(revocations.current().key_id_revoked("hosts", "x"));
         // Broken: the previous list stays, the error is remembered.
         std::fs::write(&file, "[[revoked]]\nserail = 1\n").unwrap();
         set_mtime(2_000_000_100);
-        revocations.reload(&source, &authorities);
+        revocations.reload(&source, &authorities).await;
         assert!(revocations.current().key_id_revoked("hosts", "x"));
-        assert!(revocations.tried.lock().unwrap().1.is_some());
+        assert!(revocations.tried.lock().await.1.is_some());
         // Fixed: reloaded.
         std::fs::write(&file, "[[revoked]]\nkey_id = \"y\"\n").unwrap();
         set_mtime(2_000_000_200);
-        revocations.reload(&source, &authorities);
+        revocations.reload(&source, &authorities).await;
         assert!(revocations.current().key_id_revoked("hosts", "y"));
         assert!(!revocations.current().key_id_revoked("hosts", "x"));
-        assert!(revocations.tried.lock().unwrap().1.is_none());
+        assert!(revocations.tried.lock().await.1.is_none());
+        // The KRL is signed by every authority.
+        let current = revocations.current();
+        let signatures = ssh_casign_proto::trust::split_signatures(&current.signatures());
+        assert_eq!(
+            ssh_casign_proto::trust::valid_signers(
+                ssh_casign_proto::trust::KRL_NAMESPACE,
+                &current.krl(),
+                &signatures
+            )
+            .len(),
+            2
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

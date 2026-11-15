@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+pub mod trust;
+
 /// Path of the service discovery document, relative to the service base URL.
 pub const DISCOVERY_PATH: &str = ".well-known/ssh-casign";
 
@@ -85,6 +87,13 @@ pub struct ServiceInfo {
     /// to the discovery document URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_list: Option<String>,
+    /// SSHSIG signatures of the KRL by the authorities (namespace
+    /// [`trust::KRL_NAMESPACE`]); may be relative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation_list_signatures: Option<String>,
+    /// The signed statement of which authorities to trust.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<trust::SignedTrust>,
     /// Signing authorities, so clients and servers can set up trust.
     #[serde(default)]
     pub authorities: BTreeMap<String, AuthorityInfo>,
@@ -101,4 +110,10 @@ pub struct AuthorityInfo {
     /// CA signature algorithms it offers, in order of preference.
     #[serde(default)]
     pub signature_algorithms: Vec<String>,
+    /// `known_hosts` pattern list for a host CA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_hosts_pattern: Option<String>,
+    /// No longer signs, but its certificates are still valid.
+    #[serde(default)]
+    pub retired: bool,
 }

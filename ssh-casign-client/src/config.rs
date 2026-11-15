@@ -63,6 +63,9 @@ pub struct Profile {
     pub audience: Option<String>,
     /// Token file for `token-file`.
     pub token_file: Option<PathBuf>,
+    /// Where the pinned trust statement of this service is kept (`trust
+    /// pin`); default `<data dir>/ssh-casign-client/trust/<service>.json`.
+    pub trust_store: Option<PathBuf>,
     /// Overrides the scopes published by the service.
     pub scopes: Option<Vec<String>>,
     /// Application name for this profile; overrides the top-level `app_name`.

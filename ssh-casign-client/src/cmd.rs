@@ -9,6 +9,9 @@ mod krl;
 mod login;
 mod logout;
 mod request;
+mod trust;
+
+pub(crate) use host::write_atomically;
 
 use crate::config::{Config, SignInMethod, TokenStore};
 use crate::error::{Report, Result, WrapErr};
@@ -29,6 +32,8 @@ enum Cmd {
     CaKeys(ca_keys::Args),
     /// Fetch the service's revocation list (for RevokedKeys or RevokedHostKeys)
     Krl(krl::Args),
+    /// Pin the service's signed trust statement, and sign statements offline
+    Trust(trust::Args),
 }
 
 #[derive(Parser)]
@@ -69,6 +74,7 @@ pub(crate) struct Target {
     pub(crate) client_secret_file: Option<PathBuf>,
     pub(crate) audience: Option<String>,
     pub(crate) token_file: Option<PathBuf>,
+    pub(crate) trust_store: Option<PathBuf>,
     pub(crate) app_name: Option<String>,
     pub(crate) token_store: TokenStore,
     pub(crate) ca_signature_algorithms: Option<Vec<String>>,
@@ -102,6 +108,7 @@ fn resolve_target(args: &Args, config: &Config) -> Result<Target> {
         client_secret_file: profile.and_then(|profile| profile.client_secret_file.clone()),
         audience: profile.and_then(|profile| profile.audience.clone()),
         token_file: profile.and_then(|profile| profile.token_file.clone()),
+        trust_store: profile.and_then(|profile| profile.trust_store.clone()),
         app_name: profile
             .and_then(|profile| profile.app_name.clone())
             .or_else(|| config.app_name.clone()),
@@ -115,6 +122,11 @@ fn resolve_target(args: &Args, config: &Config) -> Result<Target> {
 }
 
 pub(crate) fn run_with_config(args: &Args, config: &Config) -> CmdResult {
+    if let Cmd::Trust(trust_args) = &args.cmd {
+        if trust::is_offline(trust_args) {
+            return trust::run_offline(trust_args);
+        }
+    }
     let target = resolve_target(args, config)?;
     match &args.cmd {
         Cmd::Cert(cert_args) => cert::run(cert_args, &target),
@@ -123,6 +135,7 @@ pub(crate) fn run_with_config(args: &Args, config: &Config) -> CmdResult {
         Cmd::Host(host_args) => host::run(host_args, &target),
         Cmd::CaKeys(ca_keys_args) => ca_keys::run(ca_keys_args, &target),
         Cmd::Krl(krl_args) => krl::run(krl_args, &target),
+        Cmd::Trust(trust_args) => trust::run(trust_args, &target),
     }
 }
 

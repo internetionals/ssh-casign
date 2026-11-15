@@ -10,6 +10,7 @@ pub(crate) mod discovery;
 pub mod error;
 pub(crate) mod sign;
 pub(crate) mod token_store;
+pub(crate) mod trust_pin;
 
 pub fn run<I, T>(args: I) -> cmd::CmdResult
 where

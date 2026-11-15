@@ -10,6 +10,7 @@ mod certificate;
 mod config;
 mod proxy;
 mod revocation;
+mod trust;
 mod web;
 
 pub use config::Config;

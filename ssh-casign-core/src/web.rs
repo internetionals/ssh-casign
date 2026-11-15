@@ -30,6 +30,10 @@ pub(crate) async fn main(
             axum::routing::get(discovery::revocation_list),
         )
         .route(
+            "/revoked.krl.sig",
+            axum::routing::get(discovery::revocation_list_signatures),
+        )
+        .route(
             "/sign",
             // Including the token check's rejections: nothing from /sign may
             // be kept by a proxy or CDN.

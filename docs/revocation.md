@@ -103,7 +103,9 @@ ssh-casign-client krl -o /etc/ssh/revoked.krl
 ```
 
 The file is replaced atomically and only when the list changed; a failed download
-leaves the old file. `--on-change` runs a command after a change. `sshd` and `ssh` read
+leaves the old file. `--on-change` runs a command after a change. With a pinned trust
+statement ([trust.md](trust.md)), the KRL must be signed by every authority that isn't
+retired (`/revoked.krl.sig`), so an emptied or replaced list is refused. `sshd` and `ssh` read
 the file on each connection, so they need no reload.
 
 On servers, in `sshd_config`:
