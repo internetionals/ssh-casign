@@ -203,5 +203,6 @@ Suggested order of work
    (done, docs/revocation.md). Still to do: Entra ID auth for Azure Blob tested, and
    the real cloud stores.
 8. ~~Serverless deployment per platform, each with its cloud KMS~~ (done: Azure
-   Functions, AWS Lambda, Google Cloud Run). Still to do: tests against the real cloud
-   services, and workload identity federation for GCP.
+   Functions, AWS Lambda, Google Cloud Run). Done since: Vault/OpenBao Kubernetes,
+   JWT and AppRole logins, GCP workload identity federation, OpenStack Barbican. Still
+   to do: tests against the real cloud services.

@@ -17,21 +17,22 @@ writes the certificate to disk or loads it into `ssh-agent`.
 Workspace layout
 ----------------
 
-| Path                    | Contents                                                                    |
-|-------------------------|-----------------------------------------------------------------------------|
-| `ssh-casign-service/`   | The service binary: config source, logging, TLS, which backends a build has |
-| `ssh-casign-core/`      | Service logic: OIDC, certificate policy, key IDs, audit, HTTP API           |
-| `ssh-casign-ca/`        | Backend API, certificate encoding and verification, authorities             |
-| `ssh-casign-ca-file/`   | Backend: OpenSSH private key file                                           |
-| `ssh-casign-ca-pkcs11/` | Backend: PKCS#11 tokens (YubiKey, smart cards, HSMs)                        |
-| `ssh-casign-ca-vault/`  | Backend: OpenBao / HashiCorp Vault transit                                  |
-| `ssh-casign-ca-azure/`  | Backend: Azure Key Vault / Managed HSM, Entra ID credentials                |
-| `ssh-casign-ca-aws/`    | Backend: AWS KMS, SigV4 and AWS credentials                                 |
-| `ssh-casign-ca-gcp/`    | Backend: Google Cloud KMS and Google credentials                            |
-| `ssh-casign-client/`    | CLI client (clap): discovery, sign-in, `login`, `cert`, `logout`            |
-| `ssh-casign-proto/`     | Wire types shared by service and client                                     |
-| `deploy/`               | Platform packages (Azure Functions, AWS Lambda, Cloud Run), static build    |
-| `poc/`                  | Test IdPs, CA keys, configs and scripts (not in git)                        |
+| Path                      | Contents                                                                    |
+|---------------------------|-----------------------------------------------------------------------------|
+| `ssh-casign-service/`     | The service binary: config source, logging, TLS, which backends a build has |
+| `ssh-casign-core/`        | Service logic: OIDC, certificate policy, key IDs, audit, HTTP API           |
+| `ssh-casign-ca/`          | Backend API, certificate encoding and verification, authorities             |
+| `ssh-casign-ca-file/`     | Backend: OpenSSH private key file                                           |
+| `ssh-casign-ca-pkcs11/`   | Backend: PKCS#11 tokens (YubiKey, smart cards, HSMs)                        |
+| `ssh-casign-ca-vault/`    | Backend: OpenBao / HashiCorp Vault transit                                  |
+| `ssh-casign-ca-azure/`    | Backend: Azure Key Vault / Managed HSM, Entra ID credentials                |
+| `ssh-casign-ca-aws/`      | Backend: AWS KMS, SigV4 and AWS credentials                                 |
+| `ssh-casign-ca-gcp/`      | Backend: Google Cloud KMS and Google credentials                            |
+| `ssh-casign-ca-barbican/` | Backend: OpenStack Barbican with Keystone authentication                    |
+| `ssh-casign-client/`      | CLI client (clap): discovery, sign-in, `login`, `cert`, `logout`            |
+| `ssh-casign-proto/`       | Wire types shared by service and client                                     |
+| `deploy/`                 | Platform packages (Azure Functions, AWS Lambda, Cloud Run), static build    |
+| `poc/`                    | Test IdPs, CA keys, configs and scripts (not in git)                        |
 
 Backend crates depend only on `ssh-casign-ca`; the core never depends on a backend. The
 service binary registers the backends its Cargo features (`ca-*`) select.
@@ -167,11 +168,10 @@ certificate is recorded there). See [docs/revocation.md](docs/revocation.md).
 ### CA key backends
 
 CA keys can be in a file, on a PKCS#11 token (YubiKey, smart card, HSM), in
-OpenBao/Vault's transit engine, in Azure Key Vault, in AWS KMS or in Google Cloud KMS.
-Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`, `ca-vault`,
-`ca-azure-keyvault`, `ca-aws-kms`, `ca-gcp-kms`), so builds only contain what their
-platform needs. See
-[docs/backends.md](docs/backends.md).
+OpenBao/Vault's transit engine, in Azure Key Vault, in AWS KMS, in Google Cloud KMS or
+in OpenStack Barbican. Each backend is a Cargo feature (`ca-file`, `ca-pkcs11`,
+`ca-vault`, `ca-azure-keyvault`, `ca-aws-kms`, `ca-gcp-kms`, `ca-barbican`), so builds
+only contain what their platform needs. See [docs/backends.md](docs/backends.md).
 
 ### Behind a proxy or CDN
 

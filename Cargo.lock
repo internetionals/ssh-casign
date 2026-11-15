@@ -2346,6 +2346,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssh-casign-ca-barbican"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "ssh-casign-ca",
+ "ssh-casign-ca-file",
+ "ssh-key",
+ "tokio",
+ "toml",
+ "zeroize",
+]
+
+[[package]]
 name = "ssh-casign-ca-file"
 version = "0.1.0"
 dependencies = [
@@ -2410,7 +2425,9 @@ dependencies = [
  "serde_json",
  "ssh-casign-ca",
  "ssh-key",
+ "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -2480,6 +2497,7 @@ dependencies = [
  "ssh-casign-ca",
  "ssh-casign-ca-aws",
  "ssh-casign-ca-azure",
+ "ssh-casign-ca-barbican",
  "ssh-casign-ca-file",
  "ssh-casign-ca-gcp",
  "ssh-casign-ca-pkcs11",

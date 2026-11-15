@@ -65,6 +65,13 @@ fn registry() -> Registry {
     registry.register(ssh_casign_ca_gcp::PROVIDER, ssh_casign_ca_gcp::load);
     #[cfg(not(feature = "ca-gcp-kms"))]
     registry.unavailable("gcp_kms", "ca-gcp-kms");
+    #[cfg(feature = "ca-barbican")]
+    registry.register(
+        ssh_casign_ca_barbican::PROVIDER,
+        ssh_casign_ca_barbican::load,
+    );
+    #[cfg(not(feature = "ca-barbican"))]
+    registry.unavailable("barbican", "ca-barbican");
     registry
 }
 

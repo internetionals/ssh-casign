@@ -402,3 +402,34 @@ mod tests {
         assert!(public_key("EC_SIGN_P256_SHA256", &pem).is_err());
     }
 }
+
+#[cfg(test)]
+mod federation_tests {
+    /// Against the federation mock: `SSH_CASIGN_TEST_GCP_WIF=<dir>` with
+    /// `file-impersonate.json` and `url-direct.json` (external_account
+    /// files) and the mock's KMS at `SSH_CASIGN_TEST_GCP_ENDPOINT`.
+    #[tokio::test]
+    #[ignore = "needs the workload identity federation mock"]
+    async fn workload_identity_federation() {
+        let (Ok(dir), Ok(endpoint)) = (
+            std::env::var("SSH_CASIGN_TEST_GCP_WIF"),
+            std::env::var("SSH_CASIGN_TEST_GCP_ENDPOINT"),
+        ) else {
+            return;
+        };
+        for file in ["file-impersonate.json", "url-direct.json"] {
+            let config: toml::Table = toml::from_str(&format!(
+                "key_version = \"projects/p/locations/europe-west1/keyRings/ssh/cryptoKeys/ed/cryptoKeyVersions/1\"\n\
+                 endpoint_url = \"{endpoint}\"\ncredentials_file = \"{dir}/{file}\"\n"
+            ))
+            .unwrap();
+            let backend = super::load(config)
+                .await
+                .unwrap_or_else(|err| panic!("{file}: {err}"));
+            assert!(backend.describe().contains("workload identity federation"));
+            ssh_casign_ca::testing::issue_with_every_algorithm(backend.as_ref())
+                .await
+                .unwrap_or_else(|err| panic!("{file}: {err}"));
+        }
+    }
+}

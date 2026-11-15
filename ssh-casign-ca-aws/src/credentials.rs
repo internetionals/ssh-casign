@@ -404,4 +404,66 @@ mod tests {
         assert_eq!(credentials.session_token.as_deref(), Some("t"));
         assert_eq!(credentials.expires, parse_iso8601("2026-11-14T13:00:00Z"));
     }
+
+    /// EKS Pod Identity: the agent wants the token from
+    /// `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE`, which the kubelet rotates.
+    #[tokio::test]
+    async fn pod_identity_sends_the_current_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let dir = std::env::temp_dir().join(format!("ssh-casign-pod-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token_file = dir.join("eks-pod-identity-token");
+        std::fs::write(&token_file, "token-one\n").unwrap();
+        let expected = token_file.clone();
+        // The agent: answers when Authorization is the file's current token.
+        let agent = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let n = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]).to_ascii_lowercase();
+                let token = std::fs::read_to_string(&expected)
+                    .unwrap()
+                    .trim()
+                    .to_string();
+                let authorized = request.contains(&format!("authorization: {token}\r\n"));
+                seen.push((token, authorized));
+                // Expiring at once, so the next call fetches again.
+                let body = r#"{"AccessKeyId":"ASIA","SecretAccessKey":"s","Token":"t","Expiration":"2000-01-01T00:00:00Z"}"#;
+                let response = if authorized {
+                    format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                } else {
+                    "HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_string()
+                };
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            seen
+        });
+        std::env::set_var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", &token_file);
+        let provider = Provider {
+            http: reqwest::Client::new(),
+            source: Source::Container {
+                uri: format!("http://{address}/v1/credentials"),
+            },
+            region: "eu-west-1".into(),
+            cached: Mutex::new(None),
+        };
+        assert_eq!(provider.credentials().await.unwrap().access_key_id, "ASIA");
+        std::fs::write(&token_file, "token-two\n").unwrap();
+        assert_eq!(provider.credentials().await.unwrap().access_key_id, "ASIA");
+        std::env::remove_var("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE");
+        let seen = agent.await.unwrap();
+        assert_eq!(
+            seen,
+            [
+                ("token-one".to_string(), true),
+                ("token-two".to_string(), true)
+            ]
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

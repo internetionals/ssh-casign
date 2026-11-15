@@ -20,6 +20,9 @@ use ssh_key::public::{EcdsaPublicKey, Ed25519PublicKey, KeyData, RsaPublicKey};
 
 use ssh_casign_ca::{encoding, Backend, BackendError, BoxFuture, SignatureAlgorithm};
 
+mod auth;
+use auth::{Auth, AuthConfig};
+
 /// The `provider` name of this backend.
 pub const PROVIDER: &str = "vault";
 
@@ -48,7 +51,10 @@ struct Config {
     /// Key version to use; default: the latest at startup.
     key_version: Option<u64>,
     /// File with the Vault token; default: the `VAULT_TOKEN` variable.
+    /// Shorthand for `auth = { method = "token", token_file = "..." }`.
     token_file: Option<PathBuf>,
+    /// How to get a token: `token`, `kubernetes`, `jwt` or `approle`.
+    auth: Option<AuthConfig>,
     /// Vault Enterprise / OpenBao namespace.
     namespace: Option<String>,
     /// Extra CA certificate (PEM) to trust for the Vault server.
@@ -125,14 +131,13 @@ fn public_key(key_type: &str, public_key: &str) -> Result<KeyData, String> {
 
 impl Config {
     async fn open(&self) -> Result<VaultKey, String> {
-        let token = match &self.token_file {
-            Some(file) => std::fs::read_to_string(file)
-                .map_err(|err| format!("token file {}: {err}", file.display()))?,
-            None => std::env::var("VAULT_TOKEN")
-                .map_err(|_| "set token_file or VAULT_TOKEN".to_string())?,
-        }
-        .trim()
-        .to_string();
+        let auth_config = match (&self.auth, &self.token_file) {
+            (Some(_), Some(_)) => return Err("set token_file or auth, not both".into()),
+            (Some(auth), None) => auth.clone(),
+            (None, token_file) => AuthConfig::Token {
+                token_file: token_file.clone(),
+            },
+        };
 
         let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
         if let Some(file) = &self.ca_cert_file {
@@ -147,11 +152,19 @@ impl Config {
             self.address.trim_end_matches('/'),
             self.mount.trim_matches('/')
         );
+        let auth = Auth::new(
+            http.clone(),
+            &self.address,
+            self.namespace.clone(),
+            auth_config,
+        );
+        // Fail at startup rather than on the first request.
+        auth.token().await?;
         let mut key = VaultKey {
             http,
             base,
             name: self.key.clone(),
-            token,
+            auth,
             namespace: self.namespace.clone(),
             version: 0,
             key_type: String::new(),
@@ -179,7 +192,7 @@ pub(crate) struct VaultKey {
     /// `<address>/v1/<mount>`
     base: String,
     name: String,
-    token: String,
+    auth: Auth,
     namespace: Option<String>,
     version: u64,
     key_type: String,
@@ -194,20 +207,33 @@ impl VaultKey {
         body: Option<serde_json::Value>,
     ) -> Result<T, BackendError> {
         let url = format!("{}/{path}", self.base);
-        let mut request = self
-            .http
-            .request(method, &url)
-            .header("X-Vault-Token", &self.token);
-        if let Some(namespace) = &self.namespace {
-            request = request.header("X-Vault-Namespace", namespace);
-        }
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|err| BackendError::new(format!("{url}: {err}")))?;
+        let mut retried = false;
+        let response = loop {
+            let token = self.auth.token().await.map_err(BackendError::new)?;
+            let mut request = self
+                .http
+                .request(method.clone(), &url)
+                .header("X-Vault-Token", token);
+            if let Some(namespace) = &self.namespace {
+                request = request.header("X-Vault-Namespace", namespace);
+            }
+            if let Some(body) = &body {
+                request = request.json(body);
+            }
+            let response = request
+                .send()
+                .await
+                .map_err(|err| BackendError::new(format!("{url}: {err}")))?;
+            // A revoked or expired token: log in again, once.
+            if response.status() == reqwest::StatusCode::FORBIDDEN
+                && !retried
+                && self.auth.rejected().await
+            {
+                retried = true;
+                continue;
+            }
+            break response;
+        };
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
@@ -227,8 +253,12 @@ impl VaultKey {
 impl Backend for VaultKey {
     fn describe(&self) -> String {
         format!(
-            "vault {}/keys/{} version {} ({})",
-            self.base, self.name, self.version, self.key_type
+            "vault {}/keys/{} version {} ({}, {})",
+            self.base,
+            self.name,
+            self.version,
+            self.key_type,
+            self.auth.describe()
         )
     }
 
@@ -324,5 +354,67 @@ mod tests {
 
         assert!(public_key("aes256-gcm96", "x").is_err());
         assert!(public_key("ed25519", "AAAA").is_err());
+    }
+}
+
+#[cfg(test)]
+mod login_tests {
+    /// Against an OpenBao/Vault dev server set up by the test script:
+    /// `SSH_CASIGN_TEST_VAULT=http://127.0.0.1:8200` and
+    /// `SSH_CASIGN_TEST_VAULT_DIR` with `role-id`, `secret-id`, `k8s-token`
+    /// and `jwt-token`; the root token is `root`; logins get 6 s tokens.
+    #[tokio::test]
+    #[ignore = "needs an OpenBao/Vault dev server"]
+    async fn login_methods_sign_renew_and_relogin() {
+        let (Ok(address), Ok(dir)) = (
+            std::env::var("SSH_CASIGN_TEST_VAULT"),
+            std::env::var("SSH_CASIGN_TEST_VAULT_DIR"),
+        ) else {
+            return;
+        };
+        let auths = [
+            format!(
+                "method = \"approle\"\nrole_id_file = \"{dir}/role-id\"\nsecret_id_file = \"{dir}/secret-id\"\n"
+            ),
+            format!("method = \"kubernetes\"\nrole = \"ssh-casign\"\ntoken_file = \"{dir}/k8s-token\"\n"),
+            format!("method = \"jwt\"\nrole = \"ssh-casign\"\ntoken_file = \"{dir}/jwt-token\"\n"),
+        ];
+        let http = reqwest::Client::new();
+        for auth in auths {
+            let config: toml::Table = toml::from_str(&format!(
+                "address = \"{address}\"\nkey = \"ssh-ca\"\n[auth]\n{auth}"
+            ))
+            .unwrap();
+            let backend = super::load(config)
+                .await
+                .unwrap_or_else(|err| panic!("{auth}: {err}"));
+            ssh_casign_ca::testing::issue_with_every_algorithm(backend.as_ref())
+                .await
+                .unwrap();
+            // Past two thirds of the 6 s lease: the token is renewed.
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            ssh_casign_ca::testing::issue_with_every_algorithm(backend.as_ref())
+                .await
+                .unwrap_or_else(|err| panic!("after renewal, {auth}: {err}"));
+            // Revoke every token of the auth method: the next request gets a
+            // 403 and logs in again.
+            let mount = auth.split('"').nth(1).expect("method").to_string();
+            let response = http
+                .put(format!(
+                    "{address}/v1/sys/leases/revoke-prefix/auth/{mount}"
+                ))
+                .header("X-Vault-Token", "root")
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                response.status().is_success(),
+                "revoke: {}",
+                response.status()
+            );
+            ssh_casign_ca::testing::issue_with_every_algorithm(backend.as_ref())
+                .await
+                .unwrap_or_else(|err| panic!("after revocation, {auth}: {err}"));
+        }
     }
 }

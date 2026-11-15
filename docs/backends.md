@@ -19,6 +19,7 @@ build lacks fails at startup with the feature to enable.
 | `aws_kms`        | `ca-aws-kms`        | done   | AWS KMS                                               |
 | `azure_keyvault` | `ca-azure-keyvault` | done   | Azure Key Vault / Managed HSM                         |
 | `gcp_kms`        | `ca-gcp-kms`        | done   | Google Cloud KMS                                      |
+| `barbican`       | `ca-barbican`       | done   | OpenStack Barbican (Keystone), signed in memory       |
 
 ```sh
 # standalone server with a YubiKey or HSM
@@ -52,6 +53,7 @@ An authority offers the algorithms that both its key and its backend support (se
 | aws_kms        | yes (`ECC_NIST_EDWARDS25519`)                             | yes                 | yes                  | no                               |
 | azure_keyvault | no                                                        | yes                 | yes                  | no                               |
 | gcp_kms        | yes (`EC_SIGN_ED25519`)                                   | P-256/384           | yes                  | with `RSA_SIGN_RAW_PKCS1_*` keys |
+| barbican       | yes                                                       | yes                 | yes                  | yes                              |
 
 On platforms without SHA-1 support, profiles that need `ssh-rsa` must use an authority
 on another backend.
@@ -110,7 +112,7 @@ address = "https://vault.example.com:8200"
 mount = "transit"                        # default
 key = "ssh-ca"                           # transit key: ed25519, ecdsa-p256/384/521, rsa-2048/3072/4096
 # key_version = 3                        # default: latest at startup
-token_file = "/run/secrets/vault-token"  # or VAULT_TOKEN
+token_file = "/run/secrets/vault-token"  # or VAULT_TOKEN, or an auth table (below)
 # namespace = "admin/ssh"
 # ca_cert_file = "/etc/ssl/vault-ca.pem"
 cert_types = ["user"]
@@ -121,8 +123,24 @@ cert_types = ["user"]
   servers' `TrustedUserCAKeys` before doing so.
 - The token needs `read` on `transit/keys/<key>` and `update` on `transit/sign/<key>`
   (or a longer path for `hash_algorithm`).
-- Only token authentication so far; AppRole, Kubernetes and cloud IAM logins are not
-  implemented yet.
+- Authentication: `token_file` (re-read on every request, so a Vault Agent sidecar can
+  rotate it) or `VAULT_TOKEN`, or a login method:
+
+  ```toml
+  [authorities.vault-ecdsa.auth]
+  method = "kubernetes"                  # the pod's service account token
+  role = "ssh-casign"
+  # mount = "kubernetes"
+  # token_file = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+
+  # method = "jwt"; role = "ssh-casign"; token_file = "/run/secrets/oidc-token"
+  # method = "approle"; role_id_file = "/run/secrets/role-id"; secret_id_file = "/run/secrets/secret-id"
+  ```
+
+  Login tokens are renewed (`renew-self`) after two thirds of their lease. When renewal
+  fails, or Vault answers 403 (a revoked token), the service logs in again. Tested
+  against OpenBao 2.1.0 with all three methods, 6-second tokens and revocation in
+  between. Kubernetes auth was tested with a stand-in for the TokenReview API.
 
 `azure_keyvault`
 ----------------
@@ -212,7 +230,12 @@ cert_types = ["user"]
   (a service account key, from which the service signs a JWT, or `authorized_user`
   credentials), the gcloud credentials from `gcloud auth application-default login`,
   the metadata server (Cloud Run, GCE, GKE; `GCE_METADATA_HOST` overrides).
-  Workload identity federation (`external_account`) isn't supported yet.
+  Workload identity federation: an `external_account` file (as `gcloud iam
+  workload-identity-pools create-cred-config` writes it) exchanges a token from a file
+  or URL at Google's STS, for example a Kubernetes service account token on EKS, AKS or
+  on-prem clusters. It then optionally impersonates a service account
+  (`service_account_impersonation_url`). Text and JSON token formats work; the AWS and
+  executable sources don't. Tested against a mock of STS and IAM credentials.
 - The identity needs `cloudkms.cryptoKeyVersions.useToSign` and `viewPublicKey` (role
   `roles/cloudkms.signerVerifier`).
 - Google has no Cloud KMS emulator: tested against a mock of the documented REST API
@@ -220,6 +243,81 @@ cert_types = ["user"]
   Cloud KMS itself.
 
 Deployment on Google Cloud Run: [deploy/gcp-cloud-run](../deploy/gcp-cloud-run/README.md).
+
+`barbican`
+----------
+
+OpenStack's Barbican stores secrets but doesn't sign with them. This backend fetches
+the CA private key from Barbican when the service starts (with a Keystone token) and
+signs in memory, like `file`. Barbican keeps the key encrypted at rest and controls who
+may read it; the service host must be trusted with the key.
+
+```toml
+[authorities.openstack]
+provider = "barbican"
+secret = "5f6a2c1e-..."                  # the secret's UUID or its full URL
+auth_url = "https://keystone.example.com:5000/v3"      # default OS_AUTH_URL
+application_credential_id = "..."        # default OS_APPLICATION_CREDENTIAL_ID
+application_credential_secret_file = "/run/secrets/app-credential"
+# or a user: username, password_file, project_name, user_domain_name,
+# project_domain_name (OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME)
+# region = "RegionOne"                   # OS_REGION_NAME; interface = "public"
+# endpoint_url = "https://barbican.example.com:9311"   # instead of the catalog
+cert_types = ["user"]
+```
+
+Store the key as an unencrypted OpenSSH private key:
+
+```sh
+ssh-keygen -t ed25519 -N '' -f ca
+openstack secret store --name ssh-ca --secret-type private \
+  --payload-content-type application/octet-stream --file ca
+shred -u ca
+```
+
+- Application credentials are the better choice for a service: scoped to one
+  project, revocable, no user password.
+- The Barbican endpoint comes from the Keystone catalog (`key-manager`, by interface
+  and region) unless `endpoint_url` is set.
+- The key is read once; after rotating it in Barbican, restart the service.
+- Tested against a mock of Keystone v3 and Barbican (both authentication methods,
+  the catalog, content types), not against a real OpenStack.
+
+Secrets in containers
+---------------------
+
+Every secret the service needs can come from a file or an environment variable, so
+podman and Docker secrets, Kubernetes secrets and Vault Agent work as they are:
+
+| Part                           | Secrets from                                                    |
+|--------------------------------|-----------------------------------------------------------------|
+| `file`                         | `private_key_file`                                              |
+| `pkcs11`                       | `pin_file`                                                      |
+| `vault`                        | `token_file`, `VAULT_TOKEN`, the `auth` files                   |
+| `aws_kms`, `s3`                | `AWS_SHARED_CREDENTIALS_FILE`, `AWS_*`, token files             |
+| `azure_keyvault`, `azure_blob` | `client_secret_file`, `AZURE_CLIENT_SECRET`, `account_key_file` |
+| `gcp_kms`, `gcs`               | `credentials_file`, `GOOGLE_APPLICATION_CREDENTIALS`            |
+| `barbican`                     | `application_credential_secret_file`, `password_file`, `OS_*`   |
+| the configuration              | `SSH_CASIGN_CONFIG` (a file) or `SSH_CASIGN_CONFIG_TOML`        |
+
+With podman:
+
+```sh
+podman secret create ssh-casign-ca ./ca
+podman secret create ssh-casign-config ./config.toml
+podman run \
+  --secret ssh-casign-ca,target=/run/secrets/ca-key,mode=0400,uid=65532 \
+  --secret ssh-casign-config,target=/etc/ssh-casign/config.toml,mode=0400,uid=65532 \
+  ssh-casign-cloud-run:latest
+# or the configuration as a variable:
+#   --secret ssh-casign-config,type=env,target=SSH_CASIGN_CONFIG_TOML
+```
+
+`uid=65532` is the distroless image's `nonroot` user. The service doesn't check file
+modes, so `0400` owned by that user, or the default `0444`, both work. Tested with the
+static image in a podman pod: the CA key and the configuration as mounted secrets, and
+the configuration as an environment secret. The secrets don't show in `podman
+inspect`.
 
 Writing a backend
 -----------------

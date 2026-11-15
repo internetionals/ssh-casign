@@ -8,9 +8,12 @@
 //! | metadata server     | otherwise: Cloud Run, GCE, GKE (`GCE_METADATA_HOST` overrides) |
 //!
 //! Key files may be service account keys (`service_account`: the service
-//! signs a JWT and exchanges it for a token) or user credentials
-//! (`authorized_user`: a refresh token). Workload identity federation
-//! (`external_account`) is not supported. Tokens are cached until five
+//! signs a JWT and exchanges it for a token), user credentials
+//! (`authorized_user`: a refresh token), or workload identity federation
+//! (`external_account`): a token from elsewhere (a Kubernetes service
+//! account token file, an OIDC token from a URL) is exchanged at Google's STS
+//! for a federated token, optionally for a service account's token
+//! (`service_account_impersonation_url`). Tokens are cached until five
 //! minutes before they expire.
 
 use std::{
@@ -27,6 +30,9 @@ pub(crate) const KMS_SCOPE: &str = "https://www.googleapis.com/auth/cloudkms";
 /// Cloud Storage objects.
 pub(crate) const STORAGE_SCOPE: &str = "https://www.googleapis.com/auth/devstorage.read_write";
 const DEFAULT_TOKEN_URI: &str = "https://oauth2.googleapis.com/token";
+const DEFAULT_STS_URL: &str = "https://sts.googleapis.com/v1/token";
+/// What a federated token needs to call the IAM credentials API.
+const CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";
 const METADATA_HOST: &str = "metadata.google.internal";
 const RENEW_MARGIN: Duration = Duration::from_secs(300);
 
@@ -63,7 +69,44 @@ enum KeyFile {
         client_secret: String,
         refresh_token: String,
     },
-    ExternalAccount {},
+    ExternalAccount {
+        audience: String,
+        subject_token_type: String,
+        token_url: Option<String>,
+        service_account_impersonation_url: Option<String>,
+        credential_source: CredentialSource,
+    },
+}
+
+/// Where an external account's subject token comes from.
+#[derive(Deserialize)]
+struct CredentialSource {
+    file: Option<PathBuf>,
+    url: Option<String>,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+    format: Option<SubjectFormat>,
+    environment_id: Option<String>,
+    executable: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Clone)]
+struct SubjectFormat {
+    #[serde(rename = "type", default = "text_format")]
+    kind: String,
+    subject_token_field_name: Option<String>,
+}
+
+fn text_format() -> String {
+    "text".into()
+}
+
+enum SubjectSource {
+    File(PathBuf),
+    Url {
+        url: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 enum Source {
@@ -80,6 +123,14 @@ enum Source {
     },
     Metadata {
         host: String,
+    },
+    ExternalAccount {
+        audience: String,
+        subject_token_type: String,
+        token_url: String,
+        impersonation_url: Option<String>,
+        source: SubjectSource,
+        format: Option<SubjectFormat>,
     },
 }
 
@@ -136,11 +187,59 @@ fn load_key_file(path: &Path) -> Result<(Source, String), String> {
             },
             format!("user credentials {}", path.display()),
         ),
-        KeyFile::ExternalAccount {} => {
-            return Err(format!(
-                "{}: workload identity federation (external_account) isn't supported",
-                path.display()
-            ))
+        KeyFile::ExternalAccount {
+            audience,
+            subject_token_type,
+            token_url,
+            service_account_impersonation_url,
+            credential_source,
+        } => {
+            let unsupported = |what: &str| {
+                Err(format!(
+                    "{}: external_account with {what} credentials isn't supported (use a token file or URL)",
+                    path.display()
+                ))
+            };
+            if credential_source.environment_id.is_some() {
+                return unsupported("AWS");
+            }
+            if credential_source.executable.is_some() {
+                return unsupported("executable");
+            }
+            let source = match (credential_source.file, credential_source.url) {
+                (Some(file), None) => SubjectSource::File(file),
+                (None, Some(url)) => SubjectSource::Url {
+                    url,
+                    headers: credential_source.headers.into_iter().collect(),
+                },
+                _ => {
+                    return Err(format!(
+                        "{}: credential_source needs either file or url",
+                        path.display()
+                    ))
+                }
+            };
+            let description = match &service_account_impersonation_url {
+                Some(url) => format!(
+                    "workload identity federation ({audience}, impersonating {})",
+                    url.rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .trim_end_matches(":generateAccessToken")
+                ),
+                None => format!("workload identity federation ({audience})"),
+            };
+            (
+                Source::ExternalAccount {
+                    audience,
+                    subject_token_type,
+                    token_url: token_url.unwrap_or_else(|| DEFAULT_STS_URL.into()),
+                    impersonation_url: service_account_impersonation_url,
+                    source,
+                    format: credential_source.format,
+                },
+                description,
+            )
         }
     })
 }
@@ -235,7 +334,147 @@ impl Credentials {
         Ok(response.access_token)
     }
 
+    /// The external account's subject token.
+    async fn subject_token(
+        &self,
+        source: &SubjectSource,
+        format: Option<&SubjectFormat>,
+    ) -> Result<String, String> {
+        let raw = match source {
+            SubjectSource::File(file) => std::fs::read_to_string(file)
+                .map_err(|err| format!("subject token {}: {err}", file.display()))?,
+            SubjectSource::Url { url, headers } => {
+                let mut request = self.http.get(url).timeout(Duration::from_secs(10));
+                for (name, value) in headers {
+                    request = request.header(name, value);
+                }
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|err| format!("{url}: {err}"))?;
+                if !response.status().is_success() {
+                    return Err(format!("{url}: {}", response.status()));
+                }
+                response
+                    .text()
+                    .await
+                    .map_err(|err| format!("{url}: {err}"))?
+            }
+        };
+        let token = match format {
+            Some(format) if format.kind == "json" => {
+                let field = format
+                    .subject_token_field_name
+                    .as_deref()
+                    .ok_or("credential_source.format: json needs subject_token_field_name")?;
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|value| value.get(field)?.as_str().map(str::to_string))
+                    .ok_or_else(|| format!("subject token: no string field {field}"))?
+            }
+            _ => raw.trim().to_string(),
+        };
+        if token.is_empty() {
+            return Err("subject token is empty".into());
+        }
+        Ok(token)
+    }
+
+    async fn send_for_token(request: reqwest::RequestBuilder) -> Result<reqwest::Response, String> {
+        let response = request.send().await.map_err(|err| err.to_string())?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("{status}: {}", body.trim()));
+        }
+        Ok(response)
+    }
+
+    /// RFC 8693 token exchange at Google's STS, then (optionally) a service
+    /// account's token with the federated one.
+    async fn federated(
+        &self,
+        audience: &str,
+        subject_token_type: &str,
+        token_url: &str,
+        impersonation_url: Option<&str>,
+        source: &SubjectSource,
+        format: Option<&SubjectFormat>,
+    ) -> Result<TokenResponse, String> {
+        let subject_token = self.subject_token(source, format).await?;
+        let scope = if impersonation_url.is_some() {
+            CLOUD_PLATFORM_SCOPE
+        } else {
+            self.scope
+        };
+        let response = Self::send_for_token(self.http.post(token_url).form(&[
+            (
+                "grant_type",
+                "urn:ietf:params:oauth:grant-type:token-exchange",
+            ),
+            ("audience", audience),
+            ("scope", scope),
+            (
+                "requested_token_type",
+                "urn:ietf:params:oauth:token-type:access_token",
+            ),
+            ("subject_token", subject_token.as_str()),
+            ("subject_token_type", subject_token_type),
+        ]))
+        .await
+        .map_err(|err| format!("STS token exchange: {err}"))?;
+        let federated: TokenResponse = response
+            .json()
+            .await
+            .map_err(|err| format!("STS token exchange: invalid response: {err}"))?;
+        let Some(url) = impersonation_url else {
+            return Ok(federated);
+        };
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Impersonated {
+            access_token: String,
+        }
+        const LIFETIME: u64 = 3600;
+        let response = Self::send_for_token(
+            self.http
+                .post(url)
+                .bearer_auth(&federated.access_token)
+                .json(&serde_json::json!({ "scope": [self.scope], "lifetime": format!("{LIFETIME}s") })),
+        )
+        .await
+        .map_err(|err| format!("service account impersonation: {err}"))?;
+        let impersonated: Impersonated = response
+            .json()
+            .await
+            .map_err(|err| format!("service account impersonation: invalid response: {err}"))?;
+        Ok(TokenResponse {
+            access_token: impersonated.access_token,
+            expires_in: Some(LIFETIME),
+        })
+    }
+
     async fn request(&self) -> Result<TokenResponse, String> {
+        if let Source::ExternalAccount {
+            audience,
+            subject_token_type,
+            token_url,
+            impersonation_url,
+            source,
+            format,
+        } = &self.source
+        {
+            return self
+                .federated(
+                    audience,
+                    subject_token_type,
+                    token_url,
+                    impersonation_url.as_deref(),
+                    source,
+                    format.as_ref(),
+                )
+                .await;
+        }
         let request = match &self.source {
             Source::ServiceAccount {
                 email,
@@ -278,6 +517,7 @@ impl Credentials {
                 .query(&[("scopes", self.scope)])
                 .header("Metadata-Flavor", "Google")
                 .timeout(Duration::from_secs(5)),
+            Source::ExternalAccount { .. } => unreachable!("handled above"),
         };
         let response = request.send().await.map_err(|err| err.to_string())?;
         let status = response.status();
@@ -348,11 +588,20 @@ mod tests {
             .unwrap()
             .1
             .starts_with("user credentials"));
-        let external = write("external", r#"{"type":"external_account","audience":"x"}"#);
+        let external = write(
+            "external",
+            r#"{"type":"external_account","audience":"//iam.googleapis.com/x","subject_token_type":"urn:ietf:params:oauth:token-type:jwt","credential_source":{"file":"/var/run/secrets/token"}}"#,
+        );
         assert!(load_key_file(&external)
-            .err()
             .unwrap()
-            .contains("external_account"));
+            .1
+            .contains("workload identity federation"));
+        let aws = write(
+            "aws",
+            r#"{"type":"external_account","audience":"a","subject_token_type":"t","credential_source":{"environment_id":"aws1"}}"#,
+        );
+        assert!(load_key_file(&aws).err().unwrap().contains("AWS"));
+        std::fs::remove_file(aws).unwrap();
         let garbage = write("garbage", "{}");
         assert!(load_key_file(&garbage).is_err());
         for path in [user, external, garbage] {
