@@ -114,6 +114,8 @@ struct Certificate {
     fingerprint: String,
     key_type: String,
     signature_algorithm: String,
+    /// Other owners the key is also certified for.
+    shared_with: Vec<String>,
 }
 
 pub(super) async fn sign_key(
@@ -272,6 +274,16 @@ async fn issue(
     if revocations.key_revoked(&client_public_key) {
         return Err(Failure::new(StatusCode::FORBIDDEN, "This key is revoked"));
     }
+    if let Err(weakness) = state.key_checks.check(client_public_key.key_data()) {
+        return Err(Failure::new(
+            StatusCode::FORBIDDEN,
+            format!("Weak key: {weakness}"),
+        ));
+    }
+    let fingerprint = client_public_key
+        .fingerprint(Default::default())
+        .to_string();
+    let shared_with = shared_with(state, auth, &oidc_id, &fingerprint).await?;
     let resolved = policies.resolve(&request, cert_type).map_err(|err| {
         let message = err.to_string();
         if matches!(err, policy::Error::Conflict(_) | policy::Error::NoValidity) {
@@ -289,9 +301,6 @@ async fn issue(
             Some(serial),
         ))
         .map_err(|err| Failure::new(StatusCode::FORBIDDEN, err.to_string()))?;
-    let fingerprint = client_public_key
-        .fingerprint(Default::default())
-        .to_string();
     let key_type = client_public_key.algorithm().as_str().to_string();
     let (authority, provider, algorithm) = authority_crate::select(
         profile.settings.authorities(),
@@ -323,7 +332,54 @@ async fn issue(
         fingerprint,
         key_type,
         signature_algorithm: algorithm.to_string(),
+        shared_with,
     })
+}
+
+/// Other owners this key is already certified for, per `key_checks.duplicates`:
+/// `deny` refuses, `warn` logs and returns them for the audit record.
+async fn shared_with(
+    state: &super::state::AppState,
+    auth: &super::oidc::Authenticated,
+    oidc_id: &str,
+    fingerprint: &str,
+) -> Result<Vec<String>, Failure> {
+    use crate::key_checks::Duplicates;
+    let (Some(store), mode) = (&state.index, state.duplicates) else {
+        return Ok(Vec::new());
+    };
+    if mode == Duplicates::Allow {
+        return Ok(Vec::new());
+    }
+    let owners = match crate::index::key_owners(store.as_ref(), fingerprint).await {
+        Ok(owners) => owners,
+        Err(err) if mode == Duplicates::Deny => {
+            return Err(Failure::internal("Issuance index unavailable", err));
+        }
+        Err(err) => {
+            tracing::warn!("duplicate key check skipped: {err}");
+            return Ok(Vec::new());
+        }
+    };
+    let others: Vec<String> = owners
+        .into_iter()
+        .filter(|owner| owner.issuer != auth.issuer.issuer || owner.id != oidc_id)
+        .map(|owner| format!("{} {}", owner.issuer, owner.id))
+        .collect();
+    if others.is_empty() {
+        return Ok(others);
+    }
+    if mode == Duplicates::Deny {
+        return Err(Failure::new(
+            StatusCode::FORBIDDEN,
+            "This key is already certified for another identity; use a key of your own",
+        ));
+    }
+    tracing::warn!(
+        "key {fingerprint} of {oidc_id} is also certified for {}",
+        others.join(", ")
+    );
+    Ok(others)
 }
 
 /// Record the certificate in the issuance index, when it is on.
@@ -358,7 +414,8 @@ async fn record_index(
         },
         revoked: false,
     };
-    crate::index::record(store.as_ref(), &entry).await
+    crate::index::record(store.as_ref(), &entry).await?;
+    crate::index::record_key_owner(store.as_ref(), &issued.fingerprint, &entry.owner).await
 }
 
 async fn record_issued(
@@ -387,6 +444,7 @@ async fn record_issued(
         server_id: &state.server_id,
         requester,
         outcome: audit::Outcome::Issued(audit::Issued {
+            shared_with: &issued.shared_with,
             serial: certificate.serial(),
             key_id: certificate.key_id(),
             authority: &issued.authority,

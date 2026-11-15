@@ -6,6 +6,13 @@ description = "SSH certificate authorities with pluggable key backends"
 
 [dependencies]
 base64ct = { version = "1.8.3", features = ["alloc"] }
+curve25519-dalek = "4.1.3"
+md-5 = "0.10.6"
+num-bigint-dig = { version = "0.8.6", features = ["prime"] }
+num-traits = "0.2.19"
+p256 = "0.13.2"
+p384 = "0.13.1"
+p521 = "0.13.3"
 rand = "0.8.5"
 rsa = "0.9.10"
 serde = { version = "1.0.214", features = ["derive", "rc"] }

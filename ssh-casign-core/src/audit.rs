@@ -503,6 +503,8 @@ pub(crate) struct Requester<'a> {
 
 /// What was issued.
 pub(crate) struct Issued<'a> {
+    /// Other owners this key is also certified for (`duplicates = "warn"`).
+    pub(crate) shared_with: &'a [String],
     pub(crate) serial: u64,
     pub(crate) key_id: &'a str,
     pub(crate) authority: &'a str,
@@ -521,6 +523,8 @@ pub(crate) struct Issued<'a> {
     pub(crate) certificate: &'a str,
 }
 
+// Built on the stack for one record and only borrowed: boxing gains nothing.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Outcome<'a> {
     Issued(Issued<'a>),
     Denied {
@@ -650,6 +654,9 @@ impl Event<'_> {
                     ("sshCriticalOptions", join_options(&issued.critical_options)),
                     ("sshCertificate", issued.certificate.to_string()),
                 ]);
+                if !issued.shared_with.is_empty() {
+                    extensions.push(("sshKeySharedWith", issued.shared_with.join(",")));
+                }
             }
             Outcome::Denied { status, reason } => {
                 extensions.extend([
@@ -851,6 +858,7 @@ mod tests {
                 key_type: "ssh-ed25519",
                 signature_algorithm: "ssh-rsa",
                 certificate: "ssh-ed25519-cert-v01@openssh.com AAAA= comment",
+                shared_with: &[],
             }),
         };
         let cef = event.to_cef(&header());

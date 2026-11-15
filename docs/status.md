@@ -32,6 +32,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Host certificates                      |  ✅   | machine, admin and orchestrator routes (docs/hosts.md)   |
 | Revocation (KRL)                       |  ✅   | file and API (store) → `/revoked.krl` (docs/revocation)  |
 | Shared storage, issuance index         |  ✅   | optional; file, S3, GCS, Azure Blob                      |
+| Weak key checks                        |  ✅   | ROCA, Fermat, curve points, blocklists, shared keys      |
 | Signed trust statement, pinning        |  ✅   | automatic or offline trust keys, k of n (docs/trust.md)  |
 | Key ID template                        |  ✅   | server:profile:oidc id:app name by default               |
 | Audit log                              |  ✅   | CEF to file/stdout/syslog; fail closed (docs/audit.md)   |

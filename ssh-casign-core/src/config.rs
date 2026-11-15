@@ -17,6 +17,8 @@ pub struct Config {
     pub(crate) issuers: std::collections::BTreeMap<String, crate::web::oidc::IssuerConfig>,
     pub(crate) profiles: crate::certificate::profiles::Profiles,
     pub(crate) authorities: ssh_casign_ca::Config,
+    /// Weak key detection; on by default.
+    pub(crate) key_checks: Option<crate::key_checks::Config>,
     /// Shared storage (optional): the revocation API and the issuance index
     /// need it. `type` picks the backend.
     pub(crate) store: Option<toml::Table>,

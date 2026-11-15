@@ -10,6 +10,7 @@ mod audit;
 mod certificate;
 mod config;
 mod index;
+mod key_checks;
 mod proxy;
 mod revocation;
 mod trust;

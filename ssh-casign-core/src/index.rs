@@ -16,10 +16,50 @@ const PREFIX: &str = "issued/";
 /// Expired entries are deleted this long after expiry.
 const CLEANUP_AFTER: u64 = 7 * 86_400;
 
+fn short_hash(text: &str) -> String {
+    let digest = sha2::Sha256::digest(text.as_bytes());
+    digest.iter().take(16).map(|b| format!("{b:02x}")).collect()
+}
+
+fn owner_hash(owner: &Owner) -> String {
+    short_hash(&format!("{}\n{}", owner.issuer, owner.id))
+}
+
 fn owner_prefix(owner: &Owner) -> String {
-    let digest = sha2::Sha256::digest(format!("{}\n{}", owner.issuer, owner.id).as_bytes());
-    let hash: String = digest.iter().take(16).map(|b| format!("{b:02x}")).collect();
-    format!("{PREFIX}{hash}/")
+    format!("{PREFIX}{}/", owner_hash(owner))
+}
+
+/// `keys/<fingerprint>/<owner>.json`: who a key was certified for, to notice
+/// one key used by several owners.
+fn key_prefix(fingerprint: &str) -> String {
+    format!("keys/{}/", short_hash(fingerprint))
+}
+
+pub(crate) async fn record_key_owner(
+    store: &dyn Store,
+    fingerprint: &str,
+    owner: &Owner,
+) -> Result<(), StoreError> {
+    let data = serde_json::to_vec(owner).map_err(|err| StoreError::Other(err.to_string()))?;
+    let key = format!("{}{}.json", key_prefix(fingerprint), owner_hash(owner));
+    store.put(&key, data, Precondition::None).await?;
+    Ok(())
+}
+
+/// Everyone a key was certified for.
+pub(crate) async fn key_owners(
+    store: &dyn Store,
+    fingerprint: &str,
+) -> Result<Vec<Owner>, StoreError> {
+    let mut owners = Vec::new();
+    for key in store.list(&key_prefix(fingerprint)).await? {
+        if let Some(object) = store.get(&key).await? {
+            if let Ok(owner) = serde_json::from_slice::<Owner>(&object.data) {
+                owners.push(owner);
+            }
+        }
+    }
+    Ok(owners)
 }
 
 /// A key segment from a free-form name.
@@ -179,6 +219,24 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+        // Key owners.
+        let bob = certificate("bob", 0, now).owner;
+        record_key_owner(&store, "SHA256:abc", &alice)
+            .await
+            .unwrap();
+        record_key_owner(&store, "SHA256:abc", &alice)
+            .await
+            .unwrap();
+        record_key_owner(&store, "SHA256:abc", &bob).await.unwrap();
+        let mut owners: Vec<String> = key_owners(&store, "SHA256:abc")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|owner| owner.id)
+            .collect();
+        owners.sort();
+        assert_eq!(owners, ["alice", "bob"]);
+        assert!(key_owners(&store, "SHA256:other").await.unwrap().is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

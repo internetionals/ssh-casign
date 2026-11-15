@@ -21,6 +21,7 @@ use std::{
 };
 
 pub mod encoding;
+pub mod keycheck;
 pub mod options;
 pub mod signing;
 

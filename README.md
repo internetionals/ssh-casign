@@ -143,6 +143,14 @@ client pins it (`trust pin`); `ca-keys` and `krl` then only accept a changed set
 CAs, or a KRL, that the pinned keys signed. Authorities can be retired for rotation
 and carry a `known_hosts_pattern`. See [docs/trust.md](docs/trust.md).
 
+### Weak keys
+
+The service refuses keys whose private key may be known or computable: ROCA (Infineon)
+and Fermat-factorable RSA keys, broken RSA parameters, invalid or low-order curve
+points, keys on configured blocklists (e.g. Debian's OpenSSL keys), and optionally one
+key certified for several owners. The same checks apply to the CA keys at startup.
+See [docs/key-checks.md](docs/key-checks.md).
+
 ### Revocation
 
 Revoked certificates (by serial or key ID) and keys (by fingerprint) are listed in a
