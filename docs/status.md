@@ -34,7 +34,7 @@ Legend: ✅ done · 🟡 partial · ❌ not started.
 | Config and secrets                     |  ✅   | file or `SSH_CASIGN_CONFIG_TOML`; secrets from files   |
 | TLS termination in the service         |  ❌   | run behind a TLS-terminating proxy for now             |
 | Health endpoint                        |  ❌   | no `/healthz` (discovery works as a probe)             |
-| Automated tests                        |  🟡   | unit tests; end-to-end scripts not in the repository   |
+| Automated tests                        |  ✅   | unit tests; tests/e2e suite; Woodpecker CI             |
 
 ### Client
 
@@ -77,18 +77,25 @@ A round of tests on the real platforms (one per cloud is enough to start) is the
 valuable next step: emulators accept things the real services may not (LocalStack
 doesn't check SigV4 signatures, for example).
 
-### 2. The end-to-end tests aren't in the repository
+### 2. CI hasn't run on a Woodpecker server yet
 
-The repository has unit tests (165) and ignored tests that need a server or emulator.
-The end-to-end scripts that drove the service, the client, `sshd`, the IdPs and the
-emulators were written per feature in a scratch directory, and `poc/` is gitignored.
-There is no CI.
+The end-to-end suite is in the repository ([tests/e2e](../tests/e2e/README.md)): 19
+scenarios in three tiers, against Dex, a mock IdP, OpenBao, LocalStack, Azurite,
+fake-gcs-server, Lowkey Vault, SoftHSM, the mocks and `sshd`, run with one command
+(`tests/e2e/run.sh`). `ci/check.sh` runs the static checks and unit tests.
 
-- Move the end-to-end scenarios into the repository (a `tests/e2e/` with the mock IdP,
-  Dex, `sshd`, OpenBao and the emulators in containers), runnable with one command.
-- Add CI: fmt, clippy for every feature combination, unit tests on Linux, macOS and
-  Windows, the client's Windows build, and the container-based tests.
-- Keep the mocks (GCP, OpenStack, TokenReview) with them, marked as mocks.
+- The workflows in `.woodpecker/` (`check`, then `e2e`) pass in full with
+  `ci/woodpecker-local.sh` (`woodpecker-cli exec` on podman): all checks, 16
+  scenarios, 213 checks. They haven't run on a Woodpecker server and agent yet, nor
+  on the Kubernetes backend (services as Kubernetes Services).
+- On podman, Woodpecker reports the services as failed at teardown ("no such
+  container", [woodpecker#7472](https://github.com/woodpecker-ci/woodpecker/issues/7472),
+  fix in PR #7535). That is harmless as long as service failures are ignored, which
+  is the default; Woodpecker 4.0 wants to remove that option, and then every run on
+  podman would fail. Before upgrading, pin a release that has the fix.
+- The `packages` tier (container images, podman secrets) runs locally only; CI would
+  need a runner that may start containers.
+- The client's Windows build is only checked (`cargo check`), not tested on Windows.
 
 ### 3. Service operations
 

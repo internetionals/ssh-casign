@@ -1,0 +1,82 @@
+# Woodpecker CI: the end-to-end suite, after the checks pass.
+#
+# Works on Woodpecker's Docker, podman (docker-compatible API) and Kubernetes
+# backends. The dependencies are services that the suite reaches by name
+# (oidc, dex, openbao, ...), as tests/e2e/run.sh provides them locally;
+# images and arguments must match tests/e2e/run.sh. Services start after the
+# clone, so the ones that read fixtures find them in the workspace; `ports`
+# lets the Kubernetes backend create a Service for each.
+#
+# The packages tier (container images, podman secrets) starts containers
+# itself and runs locally only: tests/e2e/run.sh --tier packages.
+
+when:
+  - event: [push, pull_request, manual]
+
+depends_on: [check]
+
+# A fixed workspace path, so dependencies can read fixtures from it.
+workspace:
+  base: /woodpecker
+  path: src
+
+steps:
+  # The end-to-end suite (its dependencies are the services below).
+  - name: e2e
+    image: docker.io/library/rust:1-bookworm
+    environment:
+      CARGO_TARGET_DIR: /woodpecker/target
+      # Dependencies start at the same time as this step; give them time.
+      E2E_WAIT: "180"
+    commands:
+      - tests/e2e/setup-runner.sh
+      - tests/e2e/suite.sh --tier core --tier backends
+
+# The end-to-end dependencies.
+services:
+  - name: oidc
+    image: ghcr.io/navikt/mock-oauth2-server:2.1.10
+    environment:
+      JSON_CONFIG_PATH: /woodpecker/src/tests/e2e/fixtures/mock-oidc.json
+    ports: [8080]
+
+  - name: dex
+    image: ghcr.io/dexidp/dex:v2.41.1
+    commands:
+      - dex serve /woodpecker/src/tests/e2e/fixtures/dex.yaml
+    ports: [5556]
+
+  - name: openbao
+    image: docker.io/openbao/openbao:2.1.0
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: root
+    commands:
+      - bao server -dev -dev-listen-address=0.0.0.0:8200
+    ports: [8200]
+
+  - name: tokenreview
+    image: docker.io/library/python:3.12.8-slim-bookworm
+    commands:
+      - python3 -I -B /woodpecker/src/tests/e2e/mocks/tokenreview.py 8443 /woodpecker/src/tests/e2e/fixtures/k8s-token
+    ports: [8443]
+
+  - name: localstack
+    image: docker.io/localstack/localstack:4.0.3
+    environment:
+      SERVICES: kms,s3
+    ports: [4566]
+
+  - name: azurite
+    image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+    commands:
+      - azurite-blob --blobHost 0.0.0.0 --skipApiVersionCheck --location /tmp/azurite
+    ports: [10000]
+
+  - name: gcs
+    image: docker.io/fsouza/fake-gcs-server:1.54.0
+    entrypoint: [/bin/fake-gcs-server, -scheme, http, -port, "4443", -public-host, "gcs:4443"]
+    ports: [4443]
+
+  - name: lowkey
+    image: docker.io/nagyesta/lowkey-vault:2.7.1
+    ports: [8443]

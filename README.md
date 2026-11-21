@@ -32,7 +32,8 @@ Workspace layout
 | `ssh-casign-client/`      | CLI client (clap): discovery, sign-in, `login`, `cert`, `logout`            |
 | `ssh-casign-proto/`       | Wire types shared by service and client                                     |
 | `deploy/`                 | Platform packages (Azure Functions, AWS Lambda, Cloud Run), static build    |
-| `poc/`                    | Test IdPs, CA keys, configs and scripts (not in git)                        |
+| `tests/e2e/`              | End-to-end suite: scenarios, fixtures, mocks; `run.sh` with podman          |
+| `ci/`                     | `check.sh`: the static checks and unit tests CI runs                        |
 
 Backend crates depend only on `ssh-casign-ca`; the core never depends on a backend. The
 service binary registers the backends its Cargo features (`ca-*`) select.
@@ -497,63 +498,19 @@ profile's `sign_in`, then the top-level `sign_in`, then `device`. The client che
 the IdP advertises the endpoint for the chosen method, and otherwise suggests the other
 one.
 
-Local testing with the PoC
---------------------------
-
-The PoC has two test IdPs:
-
-| IdP                                                                | Use for                         | Service config        |
-|--------------------------------------------------------------------|---------------------------------|-----------------------|
-| [Dex](https://dexidp.io/)                                          | the device flow, real sign-in   | `poc/config-dex.toml` |
-| [mock-oauth2-server](https://github.com/navikt/mock-oauth2-server) | tokens with custom (SSH) claims | `poc/config.toml`     |
-
-### Sign-in with Dex
-
-Dex runs on port 5557 with the test users `user1@example.com` and `user2@example.com`,
-both with password `password`. The profile in `config-dex.toml` gives each user their
-own username as principal through a claim template.
+Testing
+-------
 
 ```sh
-# all at once: Dex, service, login into a separate ssh-agent, and an ssh login
-# into a throwaway sshd on 127.0.0.1:2222 (needs cargo build --workspace first)
-poc/e2e-login.sh
-
-# or by hand; terminal 1: Dex on :5557 (docker or podman)
-poc/dex/run.sh
-
-# terminal 2: signing service on 127.0.0.1:3000
-cd poc && cargo run -p ssh-casign-service -- config-dex.toml
-
-# terminal 3: sign in with the device flow and get a certificate
-cargo run -p ssh-casign-client -- -u http://127.0.0.1:3000 cert ~/.ssh/id_ed25519.pub
-#   follow the printed link and log in, or approve without a browser:
-#   poc/dex/approve.sh <CODE>
-ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub
-
-# or with the browser flow (drop BROWSER=... to use your real browser)
-BROWSER=poc/dex/browser.sh DEX_LOGIN=user2@example.com \
-  cargo run -p ssh-casign-client -- -u http://127.0.0.1:3000 --sign-in browser \
-  cert -n user2-admin ~/.ssh/id_ed25519.pub
+ci/check.sh                       # fmt, clippy (all feature combinations), unit tests, Windows build
+tests/e2e/run.sh                  # end-to-end: service, client, sshd, IdPs, emulators (podman)
+tests/e2e/run.sh login hosts      # selected scenarios
+tests/e2e/run.sh --tier packages  # the serverless images and podman secrets (on the host)
 ```
 
-### Custom claims with mock-oauth2-server
-
-The mock issues tokens with SSH claims (principals, limits, `upn`) for the fake user
-`user1`. It has no device flow, so pass its token with `SSH_CASIGN_TOKEN`.
-
-```sh
-# terminal 1: mock IdP on :8080 (run.sh uses docker; podman works the same)
-poc/mock-oidc-server/run.sh
-
-# terminal 2: signing service on 127.0.0.1:3000
-cd poc && cargo run -p ssh-casign-service
-
-# terminal 3: request a certificate with a token from the mock IdP (skips sign-in)
-cd poc
-SSH_CASIGN_TOKEN="$(mock-oidc-server/get_token.sh)" \
-  cargo run -p ssh-casign-client -- -u http://127.0.0.1:3000 cert ~/.ssh/id_ed25519.pub
-ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub
-
-# or without the client
-./test_client_flow.sh "$(cat ~/.ssh/id_ed25519.pub)" > cert && ssh-keygen -L -f cert
-```
+The end-to-end suite runs the real service and client against Dex, a mock IdP,
+OpenBao, LocalStack, Azurite, fake-gcs-server, Lowkey Vault, SoftHSM and `sshd`, each
+in a container on one network. The same scripts run in Woodpecker CI
+(`.woodpecker/`), with the dependencies as services; `ci/woodpecker-local.sh` runs
+those workflows on the local podman, without a Woodpecker server. See
+[tests/e2e/README.md](tests/e2e/README.md).

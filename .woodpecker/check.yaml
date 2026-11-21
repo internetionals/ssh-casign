@@ -1,0 +1,13 @@
+# Woodpecker CI: formatting, clippy for every feature combination, unit tests
+# and the client's Windows build (ci/check.sh). No services, so the builds
+# don't share memory with the end-to-end dependencies.
+
+when:
+  - event: [push, pull_request, manual]
+
+steps:
+  - name: check
+    image: docker.io/library/rust:1-bookworm
+    commands:
+      - rustup component add clippy rustfmt
+      - ci/check.sh

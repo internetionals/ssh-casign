@@ -1,0 +1,31 @@
+# Dex for the end-to-end tests (device flow and authorization code flow).
+# Test users: user1@example.com and user2@example.com, password "password".
+issuer: http://dex:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 0.0.0.0:5556
+
+oauth2:
+  skipApprovalScreen: true
+
+staticClients:
+  # A public client without redirectURIs: only then does Dex accept the device
+  # flow and loopback redirects (http://localhost:<port>/...).
+  - id: ssh-casign
+    name: ssh-casign
+    public: true
+
+enablePasswordDB: true
+staticPasswords:
+  - email: user1@example.com
+    # bcrypt of "password"
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: user1
+    userID: 08a8684b-db88-4b73-90a9-3cd1661f5466
+  - email: user2@example.com
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: user2
+    userID: 5f3a3c1e-7c43-4f43-9a55-2a6d3b1f0c2e

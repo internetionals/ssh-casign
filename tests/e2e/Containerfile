@@ -1,0 +1,5 @@
+# The end-to-end suite's runner image, for local runs (tests/e2e/run.sh).
+# CI uses the plain Rust image and runs setup-runner.sh itself.
+FROM docker.io/library/rust:1-bookworm
+COPY setup-runner.sh /usr/local/bin/setup-runner.sh
+RUN /usr/local/bin/setup-runner.sh && rustup component add clippy rustfmt

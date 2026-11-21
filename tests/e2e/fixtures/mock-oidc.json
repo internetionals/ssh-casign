@@ -1,0 +1,70 @@
+{
+  "tokenCallbacks": [
+    {
+      "issuerId": "ssh-casign",
+      "tokenExpiry": 900,
+      "requestMappings": [
+        {
+          "requestParam": "code",
+          "match": "user1",
+          "claims": {
+            "aud": "ssh-casign",
+            "upn": "user1@example.com",
+            "validity": 300,
+            "principals": [
+              "user1"
+            ],
+            "allowed_principals": [
+              "user1"
+            ]
+          }
+        },
+        {
+          "requestParam": "code",
+          "match": "admin1",
+          "claims": {
+            "aud": "ssh-casign",
+            "upn": "admin1@example.com",
+            "roles": [
+              "ssh-admin"
+            ],
+            "principals": [
+              "admin1"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "issuerId": "machines",
+      "tokenExpiry": 900,
+      "requestMappings": [
+        {
+          "requestParam": "scope",
+          "match": "host-web-1",
+          "claims": {
+            "aud": "ssh-casign-hosts",
+            "sub": "web-1",
+            "kind": "host",
+            "hostname": "WEB-1.prod.example.com",
+            "google": {
+              "compute_engine": {
+                "instance_name": "web-1"
+              }
+            },
+            "max_validity": 60
+          }
+        },
+        {
+          "requestParam": "scope",
+          "match": "orchestrator",
+          "claims": {
+            "aud": "ssh-casign-hosts",
+            "sub": "cmdb",
+            "kind": "orchestrator"
+          }
+        }
+      ]
+    }
+  ]
+}
