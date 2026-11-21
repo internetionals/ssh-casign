@@ -8,8 +8,9 @@
 //! follow the token's mechanism list.
 
 use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use cryptoki::{
@@ -131,14 +132,40 @@ impl Token {
                 .open_ro_session(self.slot)
                 .map_err(pkcs11_err("open session"))?;
             if let Some(pin) = &self.pin {
-                session
-                    .login(UserType::User, Some(&AuthPin::new(pin.clone().into())))
-                    .map_err(pkcs11_err("login"))?;
+                match session.login(UserType::User, Some(&AuthPin::new(pin.clone().into()))) {
+                    // Login is per application: another key's session on
+                    // this token already logged in.
+                    Ok(())
+                    | Err(cryptoki::error::Error::Pkcs11(
+                        cryptoki::error::RvError::UserAlreadyLoggedIn,
+                        _,
+                    )) => {}
+                    Err(err) => return Err(pkcs11_err("login")(err)),
+                }
             }
             self.session = Some(session);
         }
         Ok(self.session.as_ref().expect("opened above"))
     }
+}
+
+/// One initialized context per module: a module can only be initialized once
+/// per process, and several authorities may use keys on the same token.
+fn context(module: &Path) -> Result<Pkcs11, String> {
+    static CONTEXTS: OnceLock<Mutex<HashMap<PathBuf, Pkcs11>>> = OnceLock::new();
+    let mut contexts = CONTEXTS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(context) = contexts.get(module) {
+        return Ok(context.clone());
+    }
+    let context = Pkcs11::new(module).map_err(|err| format!("load {}: {err}", module.display()))?;
+    context
+        .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
+        .map_err(pkcs11_err("initialize"))?;
+    contexts.insert(module.to_path_buf(), context.clone());
+    Ok(context)
 }
 
 fn find_one(session: &Session, template: &[Attribute], what: &str) -> Result<ObjectHandle, String> {
@@ -207,11 +234,7 @@ impl Config {
             None => std::env::var(PIN_ENV).ok(),
         };
 
-        let context = Pkcs11::new(&self.module)
-            .map_err(|err| format!("load {}: {err}", self.module.display()))?;
-        context
-            .initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK))
-            .map_err(pkcs11_err("initialize"))?;
+        let context = context(&self.module)?;
         let slots = context
             .get_slots_with_token()
             .map_err(pkcs11_err("list tokens"))?;

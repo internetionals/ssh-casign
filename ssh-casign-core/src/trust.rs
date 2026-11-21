@@ -239,6 +239,10 @@ impl Trust {
                 if keys.is_empty() {
                     return Err("trust: no authority that isn't retired".into());
                 }
+                // Several authorities can share a key (e.g. one offering
+                // ssh-rsa next to one that doesn't); each key signs once.
+                keys.sort();
+                keys.dedup();
                 let threshold = keys.len();
                 let statement = TrustStatement {
                     id: id.clone(),
@@ -373,6 +377,19 @@ mod tests {
         assert_eq!(verified.statement.signers.threshold, 2);
         assert_eq!(verified.signed_by.len(), 2);
         assert!(verified.statement.expires > now() + 89 * 86_400);
+    }
+
+    #[tokio::test]
+    async fn authorities_sharing_a_key_sign_once() {
+        // Two authority names for one key, as with an `ssh-rsa` variant.
+        let mut authorities = ssh_casign_ca::testing::authorities(&["users"]);
+        let shared = authorities["users"].clone();
+        authorities.insert(std::sync::Arc::from("users-legacy"), shared);
+        let trust = Trust::start(None, &authorities).await.unwrap();
+        let verified = trust::verify(&trust.current(), None, now()).unwrap();
+        assert_eq!(verified.statement.signers.keys.len(), 1);
+        assert_eq!(verified.statement.signers.threshold, 1);
+        assert_eq!(verified.statement.authorities.len(), 2);
     }
 
     fn write(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {

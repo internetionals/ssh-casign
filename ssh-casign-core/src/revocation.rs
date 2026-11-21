@@ -220,7 +220,33 @@ impl FileSource {
         }
     }
 
+    /// Changes whenever the file may have: its modification time at full
+    /// precision and its size (whole seconds would miss two edits within a
+    /// second).
     fn version(&self) -> Result<u64, String> {
+        match &self.file {
+            Some(file) => {
+                let metadata =
+                    std::fs::metadata(file).map_err(|err| format!("{}: {err}", file.display()))?;
+                let modified = metadata
+                    .modified()
+                    .map_err(|err| format!("{}: {err}", file.display()))?
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default();
+                Ok(hash_u64(&format!(
+                    "{}.{}/{}",
+                    modified.as_secs(),
+                    modified.subsec_nanos(),
+                    metadata.len()
+                )))
+            }
+            None if self.inline.is_empty() => Ok(0),
+            None => Ok(self.started),
+        }
+    }
+
+    /// When the entries changed, in seconds: the KRL's version and date.
+    fn changed(&self) -> Result<u64, String> {
         match &self.file {
             Some(file) => std::fs::metadata(file)
                 .and_then(|metadata| metadata.modified())
@@ -233,7 +259,7 @@ impl FileSource {
 
     fn load(&self) -> Result<Loaded, String> {
         let mut entries = self.inline.clone();
-        let changed = self.version()?;
+        let changed = self.changed()?;
         if let Some(file) = &self.file {
             let describe = |err: &dyn std::fmt::Display| format!("{}: {err}", file.display());
             let text = std::fs::read_to_string(file).map_err(|err| describe(&err))?;
@@ -925,6 +951,41 @@ mod tests {
             .len(),
             2
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_edits_within_a_second_are_both_seen() {
+        let dir = std::env::temp_dir().join(format!("ssh-casign-krl-fast-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("revocations.toml");
+        std::fs::write(&file, "").unwrap();
+        let config: Config = toml::from_str(&format!(
+            "file = {:?}\nreload_interval = 0\n",
+            file.to_str().unwrap()
+        ))
+        .unwrap();
+        let authorities = authorities();
+        let revocations = Revocations::start(Some(&config), &authorities, None)
+            .await
+            .unwrap();
+        // Same second, different content: must still reload.
+        let set_mtime = |secs: u64, nanos: u32| {
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(UNIX_EPOCH + Duration::new(secs, nanos))
+                .unwrap();
+        };
+        std::fs::write(&file, "[[revoked]]\nkey_id = \"first\"\n").unwrap();
+        set_mtime(2_000_000_000, 100);
+        revocations.reload().await;
+        assert!(revocations.current().key_id_revoked("hosts", "first"));
+        std::fs::write(&file, "[[revoked]]\nkey_id = \"second\"\n").unwrap();
+        set_mtime(2_000_000_000, 900);
+        revocations.reload().await;
+        assert!(revocations.current().key_id_revoked("hosts", "second"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
